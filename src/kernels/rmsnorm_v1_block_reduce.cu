@@ -1,0 +1,88 @@
+#include <cuda_runtime.h>
+#include <stdint.h>
+#include "rmsnorm_common.h"
+
+// ============================================================================
+// V1: Single-pass kernel with shared memory tree reduction
+// Computes sum-of-squares, then normalizes in a single kernel launch
+// ============================================================================
+
+template<typename T>
+__global__ void rmsnorm_v1_block_reduce_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    int64_t hidden_dim,
+    float eps,
+    bool use_affine
+) {
+    int64_t row_idx = blockIdx.x;
+    int64_t row_offset = row_idx * hidden_dim;
+
+    extern __shared__ char smem_raw[];
+    float* smem = reinterpret_cast<float*>(smem_raw);
+
+    // Pass 1: accumulate sum of squares
+    float sum_sq = 0.0f;
+    for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = to_float(input[row_offset + i]);
+        sum_sq += x * x;
+    }
+
+    // Block-level reduction
+    float total_sum_sq = block_reduce_sum(sum_sq, smem, blockDim.x);
+
+    // Compute RMS
+    float rms = rsqrtf(total_sum_sq / hidden_dim + eps);
+
+    // Pass 2: normalize and apply weight/bias
+    // Re-read and normalize (still two data passes but one kernel launch)
+    T* row_output = output + row_offset;
+    for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = to_float(input[row_offset + i]);
+        float out = x * rms;
+        if (use_affine) {
+            float w = to_float(weight[i]);
+            out = out * w;
+            float b = to_float(bias[i]);
+            out = out + b;
+        }
+        row_output[i] = from_float(row_output[i], out);
+    }
+}
+
+void rmsnorm_v1_block_reduce_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+) {
+    auto input_sizes = input.sizes();
+    int64_t batch_size = input_sizes[0];
+    int64_t hidden_dim = 1;
+    for (size_t i = 1; i < input_sizes.size(); ++i) {
+        hidden_dim *= input_sizes[i];
+    }
+
+    int block_size = 256;
+    size_t smem_size = block_size * sizeof(float);
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16,
+        input.scalar_type(), "rmsnorm_v1_block_reduce",
+        [&]() {
+            rmsnorm_v1_block_reduce_kernel<scalar_t><<<batch_size, block_size, smem_size>>>(
+                input.data_ptr<scalar_t>(),
+                output.data_ptr<scalar_t>(),
+                weight.data_ptr<scalar_t>(),
+                bias.data_ptr<scalar_t>(),
+                hidden_dim,
+                eps,
+                use_affine
+            );
+        }
+    );
+}

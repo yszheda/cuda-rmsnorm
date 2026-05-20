@@ -1,0 +1,34 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.so
+*.dll
+*.dylib
+*.lib
+*.exp
+*.obj
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Profiling reports
+ncu-reports/
+*.nsight-cube
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deploy
+*.tar.gz
