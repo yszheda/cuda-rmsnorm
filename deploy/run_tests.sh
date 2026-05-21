@@ -7,6 +7,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 export PYTHONPATH="${PROJECT_DIR}/python:${PYTHONPATH}"
 
 echo "=== Running unit tests ==="

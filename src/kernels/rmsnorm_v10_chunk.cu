@@ -1,11 +1,10 @@
+#include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "rmsnorm_common.h"
 
 // ============================================================================
-// V10: Input chunking for large D (from Liger Kernel / Triton)
-// Splits hidden dimension into chunks for better register utilization
-// Reduces register spilling for large D
+// V10: Input chunking for large D
 // ============================================================================
 
 template<typename T>
@@ -25,48 +24,42 @@ __global__ void rmsnorm_v10_chunk_kernel(
     extern __shared__ char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
 
-    // Phase 1: Process each chunk, accumulating partial sum
     float total_sum_sq = 0.0f;
     int64_t num_chunks = (hidden_dim + chunk_size - 1) / chunk_size;
 
     for (int64_t c = 0; c < num_chunks; ++c) {
-        int64_t chunk_start = c * chunk_size;
-        int64_t chunk_end = min(chunk_start + chunk_size, hidden_dim);
+        int64_t cs = c * chunk_size;
+        int64_t ce = min(cs + chunk_size, hidden_dim);
 
         float chunk_sum = 0.0f;
-        for (int64_t i = chunk_start + threadIdx.x; i < chunk_end; i += blockDim.x) {
-            float x = to_float(input[row_offset + i]);
+        for (int64_t i = cs + threadIdx.x; i < ce; i += blockDim.x) {
+            float x = ConvertOps<T>::to(input[row_offset + i]);
             chunk_sum += x * x;
         }
 
-        // Reduce within block for this chunk
-        float chunk_total = warp_reduce_sum(chunk_sum);
+        float ct = warp_reduce_sum(chunk_sum);
         if (threadIdx.x % 32 == 0) {
-            atomicAdd(&total_sum_sq, chunk_total);
+            atomicAdd(&total_sum_sq, ct);
         }
         __syncthreads();
     }
 
-    // Now all threads have total_sum_sq via shared memory
     __syncthreads();
-    if (threadIdx.x == 0) {
-        smem[0] = rsqrtf(total_sum_sq / hidden_dim + eps);
-    }
+    if (threadIdx.x == 0) smem[0] = rsqrtf(total_sum_sq / hidden_dim + eps);
     __syncthreads();
     float rms = smem[0];
 
-    // Phase 2: Normalize each chunk
     for (int64_t c = 0; c < num_chunks; ++c) {
-        int64_t chunk_start = c * chunk_size;
-        int64_t chunk_end = min(chunk_start + chunk_size, hidden_dim);
+        int64_t cs = c * chunk_size;
+        int64_t ce = min(cs + chunk_size, hidden_dim);
 
-        for (int64_t i = chunk_start + threadIdx.x; i < chunk_end; i += blockDim.x) {
-            float x = to_float(input[row_offset + i]);
+        for (int64_t i = cs + threadIdx.x; i < ce; i += blockDim.x) {
+            float x = ConvertOps<T>::to(input[row_offset + i]);
             float out = x * rms;
             if (use_affine) {
-                out = out * to_float(weight[i]) + to_float(bias[i]);
+                out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
             }
-            output[row_offset + i] = from_float(output[row_offset + i], out);
+            output[row_offset + i] = ConvertOps<T>::from(out);
         }
     }
 }
@@ -87,10 +80,7 @@ void rmsnorm_v10_chunk_cuda(
     }
 
     int block_size = 256;
-    int num_warps = (block_size + 31) / 32;
-    size_t smem_size = (num_warps + 1) * sizeof(float);
-
-    // Chunk size: ~2048 for good register utilization
+    size_t smem_size = 2 * sizeof(float);
     int64_t chunk_size = 2048;
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -102,10 +92,7 @@ void rmsnorm_v10_chunk_cuda(
                 output.data_ptr<scalar_t>(),
                 weight.data_ptr<scalar_t>(),
                 bias.data_ptr<scalar_t>(),
-                hidden_dim,
-                eps,
-                use_affine,
-                chunk_size
+                hidden_dim, eps, use_affine, chunk_size
             );
         }
     );

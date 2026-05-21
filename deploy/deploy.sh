@@ -22,10 +22,10 @@ echo "=== Files synced ==="
 
 # Build on remote machine
 echo "=== Building on remote ==="
-ssh "$REMOTE" "cd $REMOTE_PATH && bash deploy/remote_build.sh"
+ssh "$REMOTE" "export PATH=/usr/local/cuda/bin:\$PATH && export LD_LIBRARY_PATH=/usr/local/cuda/lib64:\$LD_LIBRARY_PATH && cd $REMOTE_PATH && bash deploy/remote_build.sh"
 
 # Run tests
 echo "=== Running tests on remote ==="
-ssh "$REMOTE" "cd $REMOTE_PATH && bash deploy/run_tests.sh"
+ssh "$REMOTE" "export PATH=/usr/local/cuda/bin:\$PATH && export LD_LIBRARY_PATH=/usr/local/cuda/lib64:\$LD_LIBRARY_PATH && cd $REMOTE_PATH && bash deploy/run_tests.sh"
 
 echo "=== Deploy complete ==="

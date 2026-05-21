@@ -1,10 +1,10 @@
+#include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "rmsnorm_common.h"
 
 // ============================================================================
 // V6: Loop unrolling + FP32 accumulation (from Apex/TransformerEngine)
-// #pragma unroll for small D, FP32 accumulator for precision, Kahan summation for large D
 // ============================================================================
 
 template<typename T>
@@ -25,58 +25,23 @@ __global__ void rmsnorm_v6_unroll_kernel(
 
     // FP32 accumulation for precision
     float sum_sq = 0.0f;
-
-    // For large D, use Kahan summation
-    constexpr bool use_kahan = false;  // compile-time; we dispatch via template if needed
-    float kahan_c = 0.0f;
-
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
-        float product = x * x;
-        if (use_kahan) {
-            float y = product - kahan_c;
-            float t = sum_sq + y;
-            kahan_c = (t - sum_sq) - y;
-            sum_sq = t;
-        } else {
-            sum_sq += product;
-        }
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        sum_sq += x * x;
     }
 
-    // Reduction via warp shuffle
-    int lane = threadIdx.x % 32;
-    int warp_id = threadIdx.x / 32;
-    int num_warps = (blockDim.x + 31) / 32;
-
-    float warp_sum = sum_sq;
-    #pragma unroll
-    for (int mask = 16; mask > 0; mask >>= 1) {
-        warp_sum += __shfl_down_sync(0xffffffff, warp_sum, mask);
-    }
-    if (lane == 0) smem[warp_id] = warp_sum;
-    __syncthreads();
-
-    float total_sum_sq;
-    if (threadIdx.x < num_warps) {
-        float val = warp_reduce_sum(smem[threadIdx.x]);
-        if (threadIdx.x == 0) total_sum_sq = val;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) smem[0] = rsqrtf(total_sum_sq / hidden_dim + eps);
-    __syncthreads();
-    float rms = smem[0];
+    float total = block_reduce_sum(sum_sq, smem, blockDim.x);
+    float rms = rsqrtf(total / hidden_dim + eps);
 
     // Normalize with loop unrolling hint
     #pragma unroll 8
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
         float out = x * rms;
         if (use_affine) {
-            float w = to_float(weight[i]);
-            float b = to_float(bias[i]);
-            out = out * w + b;
+            out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
         }
-        output[row_offset + i] = from_float(output[row_offset + i], out);
+        output[row_offset + i] = ConvertOps<T>::from(out);
     }
 }
 
@@ -96,8 +61,7 @@ void rmsnorm_v6_unroll_cuda(
     }
 
     int block_size = 256;
-    int num_warps = (block_size + 31) / 32;
-    size_t smem_size = num_warps * sizeof(float);
+    size_t smem_size = block_size * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,

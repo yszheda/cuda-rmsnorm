@@ -1,11 +1,10 @@
+#include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "rmsnorm_common.h"
 
 // ============================================================================
-// V12: Fused residual add + RMSNorm (from vLLM/sgl-kernel)
-// Single kernel: out = rmsnorm(input + residual)
-// Eliminates intermediate DRAM traffic for input + residual
+// V12: Fused residual add + RMSNorm
 // ============================================================================
 
 template<typename T>
@@ -25,44 +24,26 @@ __global__ void rmsnorm_v12_fused_kernel(
     extern __shared__ char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
 
-    // Pass 1: load input + residual, compute sum of squares
     float sum_sq = 0.0f;
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
-        float r = to_float(residual[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        float r = ConvertOps<T>::to(residual[row_offset + i]);
         float fused = x + r;
         sum_sq += fused * fused;
     }
 
-    // Warp-shuffle reduction
-    float warp_sum = warp_reduce_sum(sum_sq);
-    int lane = threadIdx.x % 32;
-    int num_warps = (blockDim.x + 31) / 32;
-    int warp_id = threadIdx.x / 32;
+    float total = block_reduce_sum(sum_sq, smem, blockDim.x);
+    float rms = rsqrtf(total / hidden_dim + eps);
 
-    if (lane == 0) smem[warp_id] = warp_sum;
-    __syncthreads();
-
-    float total;
-    if (threadIdx.x < num_warps) {
-        float val = warp_reduce_sum(smem[threadIdx.x]);
-        if (threadIdx.x == 0) total = val;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) smem[0] = rsqrtf(total / hidden_dim + eps);
-    __syncthreads();
-    float rms = smem[0];
-
-    // Pass 2: normalize fused value and apply affine
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
-        float r = to_float(residual[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        float r = ConvertOps<T>::to(residual[row_offset + i]);
         float fused = x + r;
         float out = fused * rms;
         if (use_affine) {
-            out = out * to_float(weight[i]) + to_float(bias[i]);
+            out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
         }
-        output[row_offset + i] = from_float(output[row_offset + i], out);
+        output[row_offset + i] = ConvertOps<T>::from(out);
     }
 }
 
@@ -83,8 +64,7 @@ void rmsnorm_v12_fused_cuda(
     }
 
     int block_size = 256;
-    int num_warps = (block_size + 31) / 32;
-    size_t smem_size = num_warps * sizeof(float);
+    size_t smem_size = block_size * sizeof(float);
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
@@ -96,9 +76,7 @@ void rmsnorm_v12_fused_cuda(
                 output.data_ptr<scalar_t>(),
                 weight.data_ptr<scalar_t>(),
                 bias.data_ptr<scalar_t>(),
-                hidden_dim,
-                eps,
-                use_affine
+                hidden_dim, eps, use_affine
             );
         }
     );

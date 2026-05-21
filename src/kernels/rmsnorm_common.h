@@ -3,128 +3,119 @@
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <type_traits>
 #include <cstdint>
 
 // ============================================================================
-// Type traits and scalar/vector type mappings
+// Conversion helpers via type traits to avoid overload ambiguity
 // ============================================================================
 
 template<typename T>
-struct VecType;
+struct ConvertOps;
 
 template<>
-struct VecType<float> {
-    using scalar_t = float;
-    using vec2_t = float2;
+struct ConvertOps<float> {
+    __device__ __forceinline__ static float to(float x) { return x; }
+    __device__ __forceinline__ static float from(float x) { return x; }
+    __device__ __forceinline__ static void elem_store(float* dst, float val) { *dst = val; }
     using vec4_t = float4;
-    static constexpr int max_vec_width = 4;  // float4 = 128-bit
+    static constexpr int vec_width = 4;
+    static constexpr int align_bytes = 16;
+    using vec_elem_t = float;
 };
 
 template<>
-struct VecType<half> {
-    using scalar_t = half;
-    using vec2_t = half2;
-    using vec4_t = float4;  // half2 packed into float4 for 128-bit load
-    static constexpr int max_vec_width = 8;  // 8 x half = 128-bit
+struct ConvertOps<half> {
+    __device__ __forceinline__ static float to(half x) { return __half2float(x); }
+    __device__ __forceinline__ static half from(float x) { return __float2half(x); }
+    __device__ __forceinline__ static void elem_store(half* dst, float val) { *dst = __float2half(val); }
+    using vec4_t = float4;
+    static constexpr int vec_width = 8;
+    static constexpr int align_bytes = 16;
+    using vec_elem_t = half;
 };
 
 template<>
-struct VecType<__nv_bfloat16> {
-    using scalar_t = __nv_bfloat16;
-    using vec2_t = __nv_bfloat162;
-    using vec4_t = float4;  // bf16x2 packed into float4 for 128-bit load
-    static constexpr int max_vec_width = 8;  // 8 x bf16 = 128-bit
+struct ConvertOps<__nv_bfloat16> {
+    __device__ __forceinline__ static float to(__nv_bfloat16 x) { return __bfloat162float(x); }
+    __device__ __forceinline__ static __nv_bfloat16 from(float x) { return __float2bfloat16(x); }
+    __device__ __forceinline__ static void elem_store(__nv_bfloat16* dst, float val) { *dst = __float2bfloat16(val); }
+    using vec4_t = float4;
+    static constexpr int vec_width = 8;
+    static constexpr int align_bytes = 16;
+    using vec_elem_t = __nv_bfloat16;
 };
 
-// ============================================================================
-// Pointer alignment check
-// ============================================================================
+// PyTorch c10 type specializations
+template<>
+struct ConvertOps<c10::Half> {
+    __device__ __forceinline__ static float to(c10::Half x) { return __half2float(static_cast<half>(x)); }
+    __device__ __forceinline__ static c10::Half from(float x) { return static_cast<c10::Half>(__float2half(x)); }
+    __device__ __forceinline__ static void elem_store(half* dst, float val) { *dst = __float2half(val); }
+    using vec4_t = float4;
+    static constexpr int vec_width = 8;
+    static constexpr int align_bytes = 16;
+    using vec_elem_t = half;
+};
 
-template<int alignment_bytes>
-__device__ __forceinline__ bool is_aligned(const void* ptr) {
-    return (reinterpret_cast<uintptr_t>(ptr) % alignment_bytes) == 0;
-}
+template<>
+struct ConvertOps<c10::BFloat16> {
+    __device__ __forceinline__ static float to(c10::BFloat16 x) { return __bfloat162float(static_cast<__nv_bfloat16>(x)); }
+    __device__ __forceinline__ static c10::BFloat16 from(float x) { return static_cast<c10::BFloat16>(__float2bfloat16(x)); }
+    __device__ __forceinline__ static void elem_store(__nv_bfloat16* dst, float val) { *dst = __float2bfloat16(val); }
+    using vec4_t = float4;
+    static constexpr int vec_width = 8;
+    static constexpr int align_bytes = 16;
+    using vec_elem_t = __nv_bfloat16;
+};
+
+// Double specialization (required by AT_DISPATCH_FLOATING_TYPES_AND2)
+template<>
+struct ConvertOps<double> {
+    __device__ __forceinline__ static float to(double x) { return static_cast<float>(x); }
+    __device__ __forceinline__ static double from(float x) { return static_cast<double>(x); }
+    __device__ __forceinline__ static void elem_store(double* dst, float val) { *dst = static_cast<double>(val); }
+    using vec4_t = float4;
+    static constexpr int vec_width = 2;
+    static constexpr int align_bytes = 16;
+    using vec_elem_t = double;
+};
 
 // ============================================================================
 // Vectorized load/store helpers
 // ============================================================================
 
 template<typename T>
-__device__ __forceinline__ void vec_load_4(const T* src, T* dst, int width) {
-    for (int i = 0; i < width; ++i) {
-        dst[i] = src[i];
-    }
-}
-
-template<>
-__device__ __forceinline__ void vec_load_4<float>(const float* src, float* dst, int width) {
-    const float4* src4 = reinterpret_cast<const float4*>(src);
-    float4* dst4 = reinterpret_cast<float4*>(dst);
-    *dst4 = *src4;
-}
-
-template<>
-__device__ __forceinline__ void vec_load_4<half>(const half* src, half* dst, int width) {
-    const float4* src4 = reinterpret_cast<const float4*>(src);
-    float4* dst4 = reinterpret_cast<float4*>(dst);
-    *dst4 = *src4;
-}
-
-template<>
-__device__ __forceinline__ void vec_load_4<__nv_bfloat16>(const __nv_bfloat16* src, __nv_bfloat16* dst, int width) {
+__device__ __forceinline__ void vec_load(const T* src, T* dst) {
     const float4* src4 = reinterpret_cast<const float4*>(src);
     float4* dst4 = reinterpret_cast<float4*>(dst);
     *dst4 = *src4;
 }
 
 template<typename T>
-__device__ __forceinline__ void vec_store_4(const T* src, T* dst, int width) {
-    for (int i = 0; i < width; ++i) {
-        dst[i] = src[i];
-    }
-}
-
-template<>
-__device__ __forceinline__ void vec_store_4<float>(const float* src, float* dst, int width) {
-    const float4* src4 = reinterpret_cast<const float4*>(src);
-    float4* dst4 = reinterpret_cast<float4*>(dst);
-    *dst4 = *src4;
-}
-
-template<>
-__device__ __forceinline__ void vec_store_4<half>(const half* src, half* dst, int width) {
-    const float4* src4 = reinterpret_cast<const float4*>(src);
-    float4* dst4 = reinterpret_cast<float4*>(dst);
-    *dst4 = *src4;
-}
-
-template<>
-__device__ __forceinline__ void vec_store_4<__nv_bfloat16>(const __nv_bfloat16* src, __nv_bfloat16* dst, int width) {
+__device__ __forceinline__ void vec_store(const T* src, T* dst) {
     const float4* src4 = reinterpret_cast<const float4*>(src);
     float4* dst4 = reinterpret_cast<float4*>(dst);
     *dst4 = *src4;
 }
 
 // ============================================================================
-// Convert to/from float for computation
+// Host-side alignment check
 // ============================================================================
 
-__device__ __forceinline__ float to_float(float x) { return x; }
-__device__ __forceinline__ float to_float(half x) { return __half2float(x); }
-__device__ __forceinline__ float to_float(__nv_bfloat16 x) { return __bfloat162float(x); }
-
-__device__ __forceinline__ float from_float(float x) { return x; }
-__device__ __forceinline__ half from_float(half, float x) { return __float2half(x); }
-__device__ __forceinline__ __nv_bfloat16 from_float(__nv_bfloat16, float x) { return __float2bfloat16(x); }
+template<int alignment_bytes>
+static inline bool is_ptr_aligned(const void* ptr) {
+    return (reinterpret_cast<uintptr_t>(ptr) % alignment_bytes) == 0;
+}
 
 // ============================================================================
 // Warp-level reduction helpers
 // ============================================================================
 
-__device__ __forceinline__ float warp_reduce_sum(float val, int warp_size = 32) {
+__device__ __forceinline__ float warp_reduce_sum(float val) {
     #pragma unroll
-    for (int mask = warp_size / 2; mask > 0; mask /= 2) {
+    for (int mask = 16; mask > 0; mask >>= 1) {
         val += __shfl_down_sync(0xffffffff, val, mask);
     }
     return val;
@@ -139,16 +130,13 @@ __device__ __forceinline__ float block_reduce_sum(float val, float* smem, int bl
     int warp_id = threadIdx.x / 32;
     int num_warps = (block_dim + 31) / 32;
 
-    // Intra-warp reduction
     val = warp_reduce_sum(val);
 
-    // Write warp results to shared memory
     if (lane == 0) {
         smem[warp_id] = val;
     }
     __syncthreads();
 
-    // Inter-warp reduction
     if (threadIdx.x < num_warps) {
         val = smem[threadIdx.x];
     } else {
@@ -156,32 +144,10 @@ __device__ __forceinline__ float block_reduce_sum(float val, float* smem, int bl
     }
     val = warp_reduce_sum(val);
 
-    return val;
-}
-
-// ============================================================================
-// Occupancy calculator
-// ============================================================================
-
-__host__ inline int compute_optimal_block_size(int num_sms, int desired_blocks_per_sm = 4) {
-    // Simple heuristic: try 256, 512, 1024 and pick best
-    // In practice, query cudaOccupancyMaxActiveBlocksPerMultiprocessor
-    int candidates[] = {256, 512, 1024};
-    int best = 256;
-    int best_occupancy = 0;
-
-    for (int bs : candidates) {
-        int blocks_per_sm = 1024 / bs;  // rough estimate
-        if (blocks_per_sm > desired_blocks_per_sm) {
-            blocks_per_sm = desired_blocks_per_sm;
-        }
-        int occupancy = blocks_per_sm * bs;
-        if (occupancy > best_occupancy) {
-            best_occupancy = occupancy;
-            best = bs;
-        }
-    }
-    return best;
+    // Broadcast: thread 0 writes to smem[0], all threads read it back
+    if (threadIdx.x == 0) smem[0] = val;
+    __syncthreads();
+    return smem[0];
 }
 
 #endif // RMSNORM_COMMON_H

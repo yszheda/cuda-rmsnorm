@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# CUDA architecture - allow override via env var
+# CUDA architecture
 if(DEFINED ENV{PYTORCH_CUDA_ARCH})
     set(CMAKE_CUDA_ARCHITECTURES $ENV{PYTORCH_CUDA_ARCH})
 else()
@@ -14,6 +14,15 @@ endif()
 
 # Find CUDA toolkit
 find_package(CUDAToolkit REQUIRED)
+
+# Find PyTorch (provides torch/extension.h and ATen macros)
+execute_process(
+    COMMAND python3 -c "import torch; print(torch.utils.cmake_prefix_path)"
+    OUTPUT_VARIABLE TORCH_CMAKE_PATH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+list(APPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PATH}")
+find_package(Torch REQUIRED)
 
 # Fetch pybind11
 include(FetchContent)
@@ -56,12 +65,19 @@ pybind11_add_module(rmsnorm_ext
 target_include_directories(rmsnorm_ext PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/kernels
+    ${TORCH_INCLUDE_DIRS}
 )
 
 target_link_libraries(rmsnorm_ext PRIVATE
     CUDA::cudart
-    CUDA::nvrtc  # for potential JIT compilation
+    ${TORCH_LIBRARIES}
 )
+
+# Link torch_python for pybind11 at::Tensor type caster
+find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
+if(TORCH_PYTHON_LIBRARY)
+    target_link_libraries(rmsnorm_ext PRIVATE ${TORCH_PYTHON_LIBRARY})
+endif()
 
 # Compile flags for profiling support
 target_compile_options(rmsnorm_ext PRIVATE
@@ -70,7 +86,13 @@ target_compile_options(rmsnorm_ext PRIVATE
         -lineinfo
         --expt-relaxed-constexpr
         -Xcompiler=-fPIC
+        -Wno-deprecated-gpu-targets
     >
+)
+
+# Suppress warnings in kernel code
+set_target_properties(rmsnorm_ext PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
 )
 
 # Set output directory

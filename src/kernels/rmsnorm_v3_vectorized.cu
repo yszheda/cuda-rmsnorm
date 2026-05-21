@@ -1,11 +1,10 @@
+#include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "rmsnorm_common.h"
 
 // ============================================================================
 // V3: Vectorized loads and stores
-// Uses float4/half2/__nv_bfloat162 for 128-bit loads per instruction
-// Scalar tail loop for remainder elements
 // ============================================================================
 
 template<typename T>
@@ -24,74 +23,60 @@ __global__ void rmsnorm_v3_vectorized_kernel(
     extern __shared__ char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
 
-    // Constants for vectorization
-    constexpr int vec_width = sizeof(float4) / sizeof(T);  // 4 for fp32, 8 for fp16/bf16
+    constexpr int vec_width = ConvertOps<T>::vec_width;
     int64_t vec_dim = (hidden_dim / vec_width) * vec_width;
-    int64_t remainder = hidden_dim % vec_width;
 
-    // Pass 1: compute sum of squares with vectorized loads
+    // Vectorized sum-of-squares
     float sum_sq = 0.0f;
-
-    // Vectorized portion
     const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
     int64_t num_vec = vec_dim / vec_width;
+
     for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
         float4 v = input_vec[i];
-        // Process each element in the vector
-        const float* elems = reinterpret_cast<const float*>(&v);
+        const typename ConvertOps<T>::vec_elem_t* elems = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
         #pragma unroll
         for (int j = 0; j < vec_width; ++j) {
-            float x = elems[j];  // Already in float for computation
+            float x = ConvertOps<T>::to(elems[j]);
             sum_sq += x * x;
         }
     }
 
     // Scalar remainder
     for (int64_t i = vec_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
         sum_sq += x * x;
     }
 
-    // Block reduction
     float total_sum_sq = block_reduce_sum(sum_sq, smem, blockDim.x);
     float rms = rsqrtf(total_sum_sq / hidden_dim + eps);
 
-    // Pass 2: normalize with vectorized loads/stores
-    // Read weight and bias as vectors if affine
+    // Normalize with vectorized stores
     float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
 
     for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
         float4 vin = input_vec[i];
         float4 vout;
-        float* out_elems = reinterpret_cast<float*>(&vout);
-        const float* in_elems = reinterpret_cast<const float*>(&vin);
-
+        typename ConvertOps<T>::vec_elem_t* out_elems = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+        const typename ConvertOps<T>::vec_elem_t* in_elems = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
         #pragma unroll
         for (int j = 0; j < vec_width; ++j) {
-            float x = in_elems[j];
-            float val = x * rms;
+            float val = ConvertOps<T>::to(in_elems[j]) * rms;
             if (use_affine) {
-                float w = to_float(weight[i * vec_width + j]);
-                val = val * w;
-                float b = to_float(bias[i * vec_width + j]);
-                val = val + b;
+                val = val * ConvertOps<T>::to(weight[i * vec_width + j]) + ConvertOps<T>::to(bias[i * vec_width + j]);
             }
-            out_elems[j] = val;
+            ConvertOps<T>::elem_store(out_elems + j, val);
         }
         output_vec[i] = vout;
     }
 
     // Scalar remainder
     for (int64_t i = vec_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
         float out = x * rms;
         if (use_affine) {
-            float w = to_float(weight[i]);
-            out = out * w;
-            float b = to_float(bias[i]);
-            out = out + b;
+            out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
         }
-        output[row_offset + i] = from_float(output[row_offset + i], out);
+        output[row_offset + i] = ConvertOps<T>::from(out);
     }
 }
 

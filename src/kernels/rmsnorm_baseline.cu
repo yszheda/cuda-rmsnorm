@@ -1,11 +1,10 @@
+#include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "rmsnorm_common.h"
 
 // ============================================================================
 // Baseline: naive two-pass RMSNorm kernel
-// Pass 1: compute sum of squares
-// Pass 2: normalize and apply weight/bias
 // ============================================================================
 
 template<typename T>
@@ -20,16 +19,14 @@ __global__ void rmsnorm_baseline_pass1(
 
     float sum_sq = 0.0f;
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
         sum_sq += x * x;
     }
 
-    // Naive shared memory reduction
     extern __shared__ float smem[];
     smem[threadIdx.x] = sum_sq;
     __syncthreads();
 
-    // Tree reduction (naive, not fully optimized)
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) {
             smem[threadIdx.x] += smem[threadIdx.x + s];
@@ -58,21 +55,16 @@ __global__ void rmsnorm_baseline_pass2(
     float rms = row_sum_sq[row_idx];
 
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
         float out = x * rms;
         if (use_affine) {
-            float w = to_float(weight[i]);
-            out = out * w;
-            float b = to_float(bias[i]);
-            out = out + b;
+            float w = ConvertOps<T>::to(weight[i]);
+            float b = ConvertOps<T>::to(bias[i]);
+            out = out * w + b;
         }
-        output[row_offset + i] = from_float(output[row_offset + i], out);
+        output[row_offset + i] = ConvertOps<T>::from(out);
     }
 }
-
-// ============================================================================
-// Host launch functions
-// ============================================================================
 
 void rmsnorm_baseline_cuda(
     torch::Tensor output,

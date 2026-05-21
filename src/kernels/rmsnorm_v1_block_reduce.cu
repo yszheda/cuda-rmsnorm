@@ -1,10 +1,10 @@
+#include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include "rmsnorm_common.h"
 
 // ============================================================================
 // V1: Single-pass kernel with shared memory tree reduction
-// Computes sum-of-squares, then normalizes in a single kernel launch
 // ============================================================================
 
 template<typename T>
@@ -23,32 +23,22 @@ __global__ void rmsnorm_v1_block_reduce_kernel(
     extern __shared__ char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
 
-    // Pass 1: accumulate sum of squares
     float sum_sq = 0.0f;
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
         sum_sq += x * x;
     }
 
-    // Block-level reduction
     float total_sum_sq = block_reduce_sum(sum_sq, smem, blockDim.x);
-
-    // Compute RMS
     float rms = rsqrtf(total_sum_sq / hidden_dim + eps);
 
-    // Pass 2: normalize and apply weight/bias
-    // Re-read and normalize (still two data passes but one kernel launch)
-    T* row_output = output + row_offset;
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-        float x = to_float(input[row_offset + i]);
+        float x = ConvertOps<T>::to(input[row_offset + i]);
         float out = x * rms;
         if (use_affine) {
-            float w = to_float(weight[i]);
-            out = out * w;
-            float b = to_float(bias[i]);
-            out = out + b;
+            out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
         }
-        row_output[i] = from_float(row_output[i], out);
+        output[row_offset + i] = ConvertOps<T>::from(out);
     }
 }
 
