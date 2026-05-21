@@ -7,6 +7,8 @@
 
 // ============================================================================
 // V13: Runtime autotuning
+// Probes scalar-unroll (v6-style) vs vectorized (v15-style) paths
+// and picks the fastest for the given shape/dtype.
 // ============================================================================
 
 struct AutotuneKey {
@@ -31,48 +33,113 @@ struct HashAutotuneKey {
 };
 
 struct AutotuneResult {
-    int block_size;
-    int num_blocks;
+    int best_version;  // 6 = scalar-unroll, 15 = vectorized
     float best_time_ms;
 };
 
 static std::unordered_map<AutotuneKey, AutotuneResult, HashAutotuneKey> g_autotune_cache;
 static std::mutex g_autotune_mutex;
 
+// Scalar unroll kernel (same as v6)
 template<typename T>
-__global__ void rmsnorm_v13_autotune_kernel(
+__global__ void rmsnorm_v13_scalar_kernel(
     const T* __restrict__ input,
     T* __restrict__ output,
     const T* __restrict__ weight,
     const T* __restrict__ bias,
-    int64_t num_rows,
     int64_t hidden_dim,
     float eps,
     bool use_affine
 ) {
+    int64_t row_idx = blockIdx.x;
+    int64_t row_offset = row_idx * hidden_dim;
+
     extern __shared__ char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
 
-    for (int64_t row_idx = blockIdx.x; row_idx < num_rows; row_idx += gridDim.x) {
-        int64_t row_offset = row_idx * hidden_dim;
+    float sum_sq = 0.0f;
+    #pragma unroll 8
+    for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        sum_sq += x * x;
+    }
 
-        float sum_sq = 0.0f;
-        for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-            float x = ConvertOps<T>::to(input[row_offset + i]);
+    float total = block_reduce_sum(sum_sq, smem, blockDim.x);
+    float rms = rsqrtf(total / hidden_dim + eps);
+
+    #pragma unroll 8
+    for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        float out = x * rms;
+        if (use_affine) {
+            out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
+        }
+        output[row_offset + i] = ConvertOps<T>::from(out);
+    }
+}
+
+// Vectorized kernel (same as v15 vec path)
+template<typename T, int vec_width>
+__global__ void rmsnorm_v13_vec_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    int64_t hidden_dim,
+    float eps,
+    bool use_affine
+) {
+    int64_t row_idx = blockIdx.x;
+    int64_t row_offset = row_idx * hidden_dim;
+
+    extern __shared__ char smem_raw[];
+    float* smem = reinterpret_cast<float*>(smem_raw);
+
+    int64_t vec_dim = (hidden_dim / vec_width) * vec_width;
+    const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
+    int64_t num_vec = vec_dim / vec_width;
+
+    float sum_sq = 0.0f;
+    for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
+        float4 v = input_vec[i];
+        const typename ConvertOps<T>::vec_elem_t* e = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
+        #pragma unroll
+        for (int j = 0; j < vec_width; ++j) {
+            float x = ConvertOps<T>::to(e[j]);
             sum_sq += x * x;
         }
+    }
+    for (int64_t i = vec_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        sum_sq += x * x;
+    }
 
-        float total = block_reduce_sum(sum_sq, smem, blockDim.x);
-        float rms = rsqrtf(total / hidden_dim + eps);
+    float total = block_reduce_sum(sum_sq, smem, blockDim.x);
+    float rms = rsqrtf(total / hidden_dim + eps);
 
-        for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
-            float x = ConvertOps<T>::to(input[row_offset + i]);
-            float out = x * rms;
+    float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
+    for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
+        float4 vin = input_vec[i];
+        float4 vout;
+        typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+        const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+        #pragma unroll
+        for (int j = 0; j < vec_width; ++j) {
+            float val = ConvertOps<T>::to(ie[j]) * rms;
             if (use_affine) {
-                out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
+                val = val * ConvertOps<T>::to(weight[i * vec_width + j]) + ConvertOps<T>::to(bias[i * vec_width + j]);
             }
-            output[row_offset + i] = ConvertOps<T>::from(out);
+            ConvertOps<T>::elem_store(oe + j, val);
         }
+        output_vec[i] = vout;
+    }
+    for (int64_t i = vec_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        float out = x * rms;
+        if (use_affine) {
+            out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
+        }
+        output[row_offset + i] = ConvertOps<T>::from(out);
     }
 }
 
@@ -97,88 +164,120 @@ void rmsnorm_v13_autotune_cuda(
         std::lock_guard<std::mutex> lock(g_autotune_mutex);
         auto it = g_autotune_cache.find(key);
         if (it != g_autotune_cache.end()) {
-            auto& r = it->second;
-            int nb = r.num_blocks > 0 ? r.num_blocks : batch_size;
-            size_t smem = ((r.block_size + 31) / 32) * sizeof(float);
+            // Replay cached best
+            int block_size = 256;
+            size_t smem = ((block_size + 31) / 32) * sizeof(float);
+
             AT_DISPATCH_FLOATING_TYPES_AND2(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
                 input.scalar_type(), "rmsnorm_v13_autotune",
                 [&]() {
-                    rmsnorm_v13_autotune_kernel<scalar_t><<<nb, r.block_size, smem>>>(
-                        input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                        weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                        batch_size, hidden_dim, eps, use_affine);
+                    if (it->second.best_version == 6) {
+                        rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block_size, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                    } else {
+                        constexpr int vw = ConvertOps<scalar_t>::vec_width;
+                        rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                    }
                 });
             return;
         }
     }
 
-    int block_sizes[] = {128, 256, 512};
-    float best_time = 1e9f;
-    int best_block = 256;
-    int best_nb = batch_size;
+    // Autotune: probe scalar vs vectorized
+    int block_size = 256;
+    size_t smem = ((block_size + 31) / 32) * sizeof(float);
+    int warmup = 3;
+    int iterations = 20;
 
-    for (int bs : block_sizes) {
-        int nb = (batch_size < 64) ? 64 : batch_size;
-        size_t smem = ((bs + 31) / 32) * sizeof(float);
+    float best_time[2] = {1e9f, 1e9f};  // [0]=scalar, [1]=vectorized
 
-        for (int j = 0; j < 5; ++j) {
+    for (int strategy = 0; strategy < 2; ++strategy) {
+        // Warmup
+        for (int j = 0; j < warmup; ++j) {
             AT_DISPATCH_FLOATING_TYPES_AND2(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
                 input.scalar_type(), "rmsnorm_v13_autotune",
                 [&]() {
-                    rmsnorm_v13_autotune_kernel<scalar_t><<<nb, bs, smem>>>(
-                        input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                        weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                        batch_size, hidden_dim, eps, use_affine);
+                    if (strategy == 0) {
+                        rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block_size, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                    } else {
+                        constexpr int vw = ConvertOps<scalar_t>::vec_width;
+                        rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                    }
                 });
         }
         cudaDeviceSynchronize();
 
+        // Time
         cudaEvent_t start, stop;
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
         cudaEventRecord(start);
-        for (int j = 0; j < 10; ++j) {
+        for (int j = 0; j < iterations; ++j) {
             AT_DISPATCH_FLOATING_TYPES_AND2(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
                 input.scalar_type(), "rmsnorm_v13_autotune",
                 [&]() {
-                    rmsnorm_v13_autotune_kernel<scalar_t><<<nb, bs, smem>>>(
-                        input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                        weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                        batch_size, hidden_dim, eps, use_affine);
+                    if (strategy == 0) {
+                        rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block_size, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                    } else {
+                        constexpr int vw = ConvertOps<scalar_t>::vec_width;
+                        rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                    }
                 });
         }
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
         float ms;
         cudaEventElapsedTime(&ms, start, stop);
-        float avg = ms / 10;
+        best_time[strategy] = ms / iterations;
 
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
-
-        if (avg < best_time) {
-            best_time = avg;
-            best_block = bs;
-            best_nb = nb;
-        }
     }
+
+    int best_strategy = (best_time[0] <= best_time[1]) ? 6 : 15;
 
     {
         std::lock_guard<std::mutex> lock(g_autotune_mutex);
-        g_autotune_cache[key] = {best_block, best_nb, best_time};
+        g_autotune_cache[key] = {best_strategy, best_time[best_strategy == 6 ? 0 : 1]};
     }
 
-    size_t smem = ((best_block + 31) / 32) * sizeof(float);
+    // Launch best
+    smem = ((block_size + 31) / 32) * sizeof(float);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
         input.scalar_type(), "rmsnorm_v13_autotune",
         [&]() {
-            rmsnorm_v13_autotune_kernel<scalar_t><<<best_nb, best_block, smem>>>(
-                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                batch_size, hidden_dim, eps, use_affine);
+            if (best_strategy == 6) {
+                rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block_size, smem>>>(
+                    input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                    weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                    hidden_dim, eps, use_affine);
+            } else {
+                constexpr int vw = ConvertOps<scalar_t>::vec_width;
+                rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
+                    input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                    weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                    hidden_dim, eps, use_affine);
+            }
         });
 }

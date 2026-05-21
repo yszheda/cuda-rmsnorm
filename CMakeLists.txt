@@ -50,6 +50,7 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v12_fused.cu
     src/kernels/rmsnorm_v13_autotune.cu
     src/kernels/rmsnorm_v14_cudagraph.cu
+    src/kernels/rmsnorm_v15_vec_unroll.cu
 )
 
 set(BINDING_SOURCES

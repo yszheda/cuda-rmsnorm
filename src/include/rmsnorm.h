@@ -157,4 +157,14 @@ void rmsnorm_v14_cudagraph_cuda(
     bool use_affine
 );
 
+// V15: Combined vectorized + unroll (best-of-all-techniques)
+void rmsnorm_v15_vec_unroll_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
