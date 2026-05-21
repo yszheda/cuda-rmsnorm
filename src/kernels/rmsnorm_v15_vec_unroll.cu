@@ -4,9 +4,9 @@
 #include "rmsnorm_common.h"
 
 // ============================================================================
-// V15: Combined best techniques — vectorized + unroll
+// V15: Combined best techniques -- vectorized + unroll
 // - Vectorized 128-bit loads/stores for memory bandwidth
-// - Manual loop unrolling via tile factor matching thread count
+// - Vectorized weight/bias loads (8x fewer memory ops for affine transform)
 // - Alignment-aware dispatch with scalar fallback
 // ============================================================================
 
@@ -33,7 +33,6 @@ __global__ void rmsnorm_v15_vec_unroll_kernel(
 
     float sum_sq = 0.0f;
 
-    // Each thread handles one vector per iteration, strided by block size
     for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
         float4 v = input_vec[i];
         const typename ConvertOps<T>::vec_elem_t* e = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
@@ -53,19 +52,34 @@ __global__ void rmsnorm_v15_vec_unroll_kernel(
     float total = block_reduce_sum(sum_sq, smem, blockDim.x);
     float rms = rsqrtf(total / hidden_dim + eps);
 
-    // Vectorized normalize
+    // Vectorized normalize with vectorized weight/bias loads
     float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
+
+    // Pre-compute vectorized weight/bias pointers (shared across all rows)
+    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
 
     for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
         float4 vin = input_vec[i];
         float4 vout;
+
+        // Load weight and bias as vectors (8x fewer memory ops for fp16/bf16)
+        float4 wv, bv;
+        if (use_affine) {
+            wv = weight_vec[i];
+            bv = bias_vec[i];
+        }
+
         typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
         const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+        const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+        const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+
         #pragma unroll
         for (int j = 0; j < vec_width; ++j) {
             float val = ConvertOps<T>::to(ie[j]) * rms;
             if (use_affine) {
-                val = val * ConvertOps<T>::to(weight[i * vec_width + j]) + ConvertOps<T>::to(bias[i * vec_width + j]);
+                val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
             }
             ConvertOps<T>::elem_store(oe + j, val);
         }

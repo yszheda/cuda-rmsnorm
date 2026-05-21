@@ -179,10 +179,20 @@ void rmsnorm_v13_autotune_cuda(
                             hidden_dim, eps, use_affine);
                     } else {
                         constexpr int vw = ConvertOps<scalar_t>::vec_width;
-                        rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
-                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                            hidden_dim, eps, use_affine);
+                        constexpr int ab = ConvertOps<scalar_t>::align_bytes;
+                        bool replay_aligned = is_ptr_aligned<ab>(input.data_ptr<scalar_t>())
+                                           && is_ptr_aligned<ab>(output.data_ptr<scalar_t>());
+                        if (replay_aligned) {
+                            rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
+                                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                                weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                                hidden_dim, eps, use_affine);
+                        } else {
+                            rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block_size, smem>>>(
+                                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                                weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                                hidden_dim, eps, use_affine);
+                        }
                     }
                 });
             return;
@@ -192,8 +202,19 @@ void rmsnorm_v13_autotune_cuda(
     // Autotune: probe scalar vs vectorized
     int block_size = 256;
     size_t smem = ((block_size + 31) / 32) * sizeof(float);
-    int warmup = 3;
-    int iterations = 20;
+    int warmup = 2;
+    int iterations = 10;
+
+    // Check alignment for vectorized path
+    bool aligned = false;
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16,
+        input.scalar_type(), "rmsnorm_v13_autotune_align",
+        [&]() {
+            constexpr int ab = ConvertOps<scalar_t>::align_bytes;
+            aligned = is_ptr_aligned<ab>(input.data_ptr<scalar_t>())
+                   && is_ptr_aligned<ab>(output.data_ptr<scalar_t>());
+        });
 
     float best_time[2] = {1e9f, 1e9f};  // [0]=scalar, [1]=vectorized
 
@@ -274,10 +295,20 @@ void rmsnorm_v13_autotune_cuda(
                     hidden_dim, eps, use_affine);
             } else {
                 constexpr int vw = ConvertOps<scalar_t>::vec_width;
-                rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
-                    input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                    weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                    hidden_dim, eps, use_affine);
+                constexpr int ab = ConvertOps<scalar_t>::align_bytes;
+                bool launch_aligned = is_ptr_aligned<ab>(input.data_ptr<scalar_t>())
+                                   && is_ptr_aligned<ab>(output.data_ptr<scalar_t>());
+                if (launch_aligned) {
+                    rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
+                        input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                        weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                        hidden_dim, eps, use_affine);
+                } else {
+                    rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block_size, smem>>>(
+                        input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                        weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                        hidden_dim, eps, use_affine);
+                }
             }
         });
 }
