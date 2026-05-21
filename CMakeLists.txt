@@ -90,11 +90,6 @@ target_compile_options(rmsnorm_ext PRIVATE
     >
 )
 
-# Suppress warnings in kernel code
-set_target_properties(rmsnorm_ext PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-)
-
 # Set output directory
 set_target_properties(rmsnorm_ext PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python/rmsnorm

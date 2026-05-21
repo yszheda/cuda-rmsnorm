@@ -23,11 +23,12 @@ __global__ void rmsnorm_v8_warp_spec_kernel(
     extern __shared__ char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
 
-    const int num_warps_in_block = blockDim.x / 32;
-    const int num_reduce_warps = 2;
     const int lane = threadIdx.x % 32;
     const int warp_id = threadIdx.x / 32;
+    const int num_warps_in_block = blockDim.x / 32;
+    const int num_reduce_warps = 2;
 
+    // Phase 1: Reduce warps compute partial sum-of-squares
     float sum_sq = 0.0f;
     if (warp_id < num_reduce_warps) {
         int64_t chunk_size = (hidden_dim + num_reduce_warps - 1) / num_reduce_warps;
@@ -45,20 +46,24 @@ __global__ void rmsnorm_v8_warp_spec_kernel(
             warp_sum += __shfl_down_sync(0xffffffff, warp_sum, mask);
         }
         if (lane == 0) smem[warp_id] = warp_sum;
-        __syncthreads();
-
-        if (threadIdx.x == 0) {
-            float total = smem[0] + smem[1];
-            smem[0] = rsqrtf(total / hidden_dim + eps);
-        }
-    } else {
-        __syncthreads();
     }
+    __syncthreads();
+
+    // Phase 2: Thread 0 combines partial sums and computes RMS
+    if (threadIdx.x == 0) {
+        float total = 0.0f;
+        for (int w = 0; w < num_reduce_warps; ++w) {
+            total += smem[w];
+        }
+        smem[0] = rsqrtf(total / hidden_dim + eps);
+    }
+    __syncthreads();
 
     float rms = smem[0];
 
+    // Phase 3: Only normalize warps (skip reduction warps)
     const int num_norm_warps = num_warps_in_block - num_reduce_warps;
-    if (num_norm_warps > 0) {
+    if (warp_id >= num_reduce_warps && num_norm_warps > 0) {
         int64_t norm_chunk = (hidden_dim + num_norm_warps - 1) / num_norm_warps;
         int64_t norm_start = (warp_id - num_reduce_warps) * norm_chunk;
         int64_t norm_end = min(norm_start + norm_chunk, hidden_dim);

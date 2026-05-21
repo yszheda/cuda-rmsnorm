@@ -37,17 +37,10 @@ __global__ void rmsnorm_v10_chunk_kernel(
             chunk_sum += x * x;
         }
 
-        float ct = warp_reduce_sum(chunk_sum);
-        if (threadIdx.x % 32 == 0) {
-            atomicAdd(&total_sum_sq, ct);
-        }
-        __syncthreads();
+        total_sum_sq += block_reduce_sum(chunk_sum, smem, blockDim.x);
     }
 
-    __syncthreads();
-    if (threadIdx.x == 0) smem[0] = rsqrtf(total_sum_sq / hidden_dim + eps);
-    __syncthreads();
-    float rms = smem[0];
+    float rms = rsqrtf(total_sum_sq / hidden_dim + eps);
 
     for (int64_t c = 0; c < num_chunks; ++c) {
         int64_t cs = c * chunk_size;
@@ -80,7 +73,7 @@ void rmsnorm_v10_chunk_cuda(
     }
 
     int block_size = 256;
-    size_t smem_size = 2 * sizeof(float);
+    size_t smem_size = ((block_size + 31) / 32) * sizeof(float);
     int64_t chunk_size = 2048;
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
