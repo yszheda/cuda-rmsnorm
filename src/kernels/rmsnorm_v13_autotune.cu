@@ -213,14 +213,13 @@ void rmsnorm_v13_autotune_cuda(
         }
     }
 
-    // Autotune: probe scalar vs vectorized
+    // Autotune: probe scalar vs vectorized with heuristic-first approach
     int block_size = 256;
     size_t smem = ((block_size + 31) / 32) * sizeof(float);
-    int warmup = 2;
-    int iterations = 10;
 
-    // Check alignment for vectorized path
+    // Check alignment
     bool aligned = false;
+    int dtype_code = 0;  // 0=fp32, 1=fp16, 2=bf16
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
         input.scalar_type(), "rmsnorm_v13_autotune_align",
@@ -228,12 +227,27 @@ void rmsnorm_v13_autotune_cuda(
             constexpr int ab = ConvertOps<scalar_t>::align_bytes;
             aligned = is_ptr_aligned<ab>(input.data_ptr<scalar_t>())
                    && is_ptr_aligned<ab>(output.data_ptr<scalar_t>());
+            if constexpr (std::is_same_v<scalar_t, c10::Half>) dtype_code = 1;
+            else if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) dtype_code = 2;
+            else dtype_code = 0;
         });
 
-    float best_time[2] = {1e9f, 1e9f};  // [0]=scalar, [1]=vectorized
+    // Heuristic: fp16/bf16 + aligned → vectorized, else → scalar
+    // Vectorized wins when 128-bit loads save memory ops for half-precision types
+    int heuristic = (dtype_code > 0 && aligned && hidden_dim >= 1024) ? 1 : 0;
 
+    // Validate heuristic with lightweight timing (1 warmup + 5 iterations)
+    int warmup = 1;
+    int iterations = 5;
+
+    float times[2] = {0, 0};
     for (int strategy = 0; strategy < 2; ++strategy) {
-        // Warmup
+        // Only time if it's the heuristic choice or a close competitor
+        if (strategy != heuristic && (dtype_code == 0 || !aligned || hidden_dim < 2048)) {
+            times[strategy] = 1e9f;  // skip timing non-competitors
+            continue;
+        }
+
         for (int j = 0; j < warmup; ++j) {
             AT_DISPATCH_FLOATING_TYPES_AND2(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
@@ -244,7 +258,7 @@ void rmsnorm_v13_autotune_cuda(
                             input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
                             weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
                             hidden_dim, eps, use_affine);
-                    } else {
+                    } else if (aligned) {
                         constexpr int vw = ConvertOps<scalar_t>::vec_width;
                         rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
                             input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
@@ -255,7 +269,6 @@ void rmsnorm_v13_autotune_cuda(
         }
         cudaDeviceSynchronize();
 
-        // Time
         cudaEvent_t start, stop;
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
@@ -270,7 +283,7 @@ void rmsnorm_v13_autotune_cuda(
                             input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
                             weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
                             hidden_dim, eps, use_affine);
-                    } else {
+                    } else if (aligned) {
                         constexpr int vw = ConvertOps<scalar_t>::vec_width;
                         rmsnorm_v13_vec_kernel<scalar_t, vw><<<batch_size, block_size, smem>>>(
                             input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
@@ -283,17 +296,17 @@ void rmsnorm_v13_autotune_cuda(
         cudaEventSynchronize(stop);
         float ms;
         cudaEventElapsedTime(&ms, start, stop);
-        best_time[strategy] = ms / iterations;
+        times[strategy] = ms / iterations;
 
         cudaEventDestroy(start);
         cudaEventDestroy(stop);
     }
 
-    int best_strategy = (best_time[0] <= best_time[1]) ? 6 : 15;
+    int best_strategy = (times[0] <= times[1]) ? 6 : 15;
 
     {
         std::lock_guard<std::mutex> lock(g_autotune_mutex);
-        g_autotune_cache[key] = {best_strategy, best_time[best_strategy == 6 ? 0 : 1]};
+        g_autotune_cache[key] = {best_strategy, times[best_strategy == 6 ? 0 : 1]};
     }
 
     // Launch best
