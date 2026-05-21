@@ -78,7 +78,7 @@ __global__ void rmsnorm_v13_scalar_kernel(
     }
 }
 
-// Vectorized kernel (same as v15 vec path)
+// Vectorized kernel (with vectorized weight/bias loads)
 template<typename T, int vec_width>
 __global__ void rmsnorm_v13_vec_kernel(
     const T* __restrict__ input,
@@ -98,6 +98,10 @@ __global__ void rmsnorm_v13_vec_kernel(
     int64_t vec_dim = (hidden_dim / vec_width) * vec_width;
     const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
     int64_t num_vec = vec_dim / vec_width;
+
+    // Pre-compute vectorized weight/bias pointers
+    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
 
     float sum_sq = 0.0f;
     for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
@@ -121,13 +125,23 @@ __global__ void rmsnorm_v13_vec_kernel(
     for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
         float4 vin = input_vec[i];
         float4 vout;
+
+        // Load weight and bias as vectors
+        float4 wv, bv;
+        if (use_affine) {
+            wv = weight_vec[i];
+            bv = bias_vec[i];
+        }
+
         typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
         const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+        const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+        const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
         #pragma unroll
         for (int j = 0; j < vec_width; ++j) {
             float val = ConvertOps<T>::to(ie[j]) * rms;
             if (use_affine) {
-                val = val * ConvertOps<T>::to(weight[i * vec_width + j]) + ConvertOps<T>::to(bias[i * vec_width + j]);
+                val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
             }
             ConvertOps<T>::elem_store(oe + j, val);
         }
