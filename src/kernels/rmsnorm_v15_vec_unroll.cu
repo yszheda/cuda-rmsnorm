@@ -87,6 +87,13 @@ __global__ void rmsnorm_v15_vec_unroll_kernel(
 
     // Scalar remainder for normalize
     for (int64_t i = vec_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        float out = x * rms;
+        if (use_affine) {
+            out = out * ConvertOps<T>::to(weight[i]) + ConvertOps<T>::to(bias[i]);
+        }
+        output[row_offset + i] = ConvertOps<T>::from(out);
+    }
 }
 
 // Scalar fallback for misaligned pointers (same as v6)
