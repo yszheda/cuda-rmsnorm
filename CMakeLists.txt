@@ -51,7 +51,6 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v13_autotune.cu
     src/kernels/rmsnorm_v14_cudagraph.cu
     src/kernels/rmsnorm_v15_vec_unroll.cu
-    src/kernels/rmsnorm_v16_vec_persistent.cu
 )
 
 set(BINDING_SOURCES
