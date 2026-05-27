@@ -167,4 +167,14 @@ void rmsnorm_v15_vec_unroll_cuda(
     bool use_affine
 );
 
+// V18: Dynamic block size + read-only cache hints
+void rmsnorm_v18_dynamic_block_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H

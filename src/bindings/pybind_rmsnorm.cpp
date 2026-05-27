@@ -55,6 +55,7 @@ void rmsnorm_cuda_wrapper(
         case 13: rmsnorm_v13_autotune_cuda(output, input, weight, bias, eps, use_affine); break;
         case 14: rmsnorm_v14_cudagraph_cuda(output, input, weight, bias, eps, use_affine); break;
         case 15: rmsnorm_v15_vec_unroll_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 18: rmsnorm_v18_dynamic_block_cuda(output, input, weight, bias, eps, use_affine); break;
         default:
             // Use the best version (v15) as default
             rmsnorm_v15_vec_unroll_cuda(output, input, weight, bias, eps, use_affine);

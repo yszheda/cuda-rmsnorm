@@ -95,7 +95,7 @@ MODEL_SHAPES = [
 ]
 
 # Kernel versions to benchmark
-KERNEL_VERSIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15]
+KERNEL_VERSIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 18]
 
 
 def run_benchmark(shapes: List[Tuple[int, int]] = None, quick: bool = False):
