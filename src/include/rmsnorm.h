@@ -207,4 +207,14 @@ void rmsnorm_v21_persistent_cuda(
     bool use_affine
 );
 
+// V22: Persistent v2 with dynamic block size
+void rmsnorm_v22_persistent_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H

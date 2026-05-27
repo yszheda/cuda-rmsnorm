@@ -55,6 +55,7 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v19_vec_unroll2.cu
     src/kernels/rmsnorm_v20_half2.cu
     src/kernels/rmsnorm_v21_persistent.cu
+    src/kernels/rmsnorm_v22_persistent2.cu
 )
 
 set(BINDING_SOURCES
