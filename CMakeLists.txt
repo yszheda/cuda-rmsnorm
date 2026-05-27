@@ -52,6 +52,9 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v14_cudagraph.cu
     src/kernels/rmsnorm_v15_vec_unroll.cu
     src/kernels/rmsnorm_v18_dynamic_block.cu
+    src/kernels/rmsnorm_v19_vec_unroll2.cu
+    src/kernels/rmsnorm_v20_half2.cu
+    src/kernels/rmsnorm_v21_persistent.cu
 )
 
 set(BINDING_SOURCES

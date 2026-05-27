@@ -177,4 +177,34 @@ void rmsnorm_v18_dynamic_block_cuda(
     bool use_affine
 );
 
+// V19: Normalize loop unroll (2x) + __ldg() cache hints + dynamic block
+void rmsnorm_v19_vec_unroll_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
+// V20: Half2 native math (__hmul2/__hfma2) for fp16/bf16
+void rmsnorm_v20_half2_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
+// V21: Persistent multi-row kernel (amortizes launch overhead)
+void rmsnorm_v21_persistent_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
