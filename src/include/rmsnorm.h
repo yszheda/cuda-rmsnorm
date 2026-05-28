@@ -217,4 +217,14 @@ void rmsnorm_v22_persistent_cuda(
     bool use_affine
 );
 
+// V23: Warp-persistent kernel (each warp = 1 row, cycles through all rows)
+void rmsnorm_v23_warp_persistent_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
