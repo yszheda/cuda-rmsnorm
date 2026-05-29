@@ -230,6 +230,129 @@ static void launch_const_dim_v13(const T* input, T* output,
     }
 }
 
+// v19-style: dynamic block + __ldg() + normalize 2x unroll
+template<typename T, int vec_width>
+__global__ void rmsnorm_v13_unroll2_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    int64_t hidden_dim,
+    float eps,
+    bool use_affine
+) {
+    int64_t row_idx = blockIdx.x;
+    int64_t row_offset = row_idx * hidden_dim;
+    extern __shared__ char smem_raw[];
+    float* smem = reinterpret_cast<float*>(smem_raw);
+
+    int64_t vec_dim = (hidden_dim / vec_width) * vec_width;
+    const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
+    int64_t num_vec = vec_dim / vec_width;
+    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
+
+    float sum_sq = 0.0f;
+    for (int64_t i = threadIdx.x; i < num_vec; i += blockDim.x) {
+        float4 v = input_vec[i];
+        const typename ConvertOps<T>::vec_elem_t* e = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
+        #pragma unroll
+        for (int j = 0; j < vec_width; ++j) {
+            float x = ConvertOps<T>::to(e[j]);
+            sum_sq += x * x;
+        }
+    }
+    for (int64_t i = vec_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        sum_sq += x * x;
+    }
+    float total = block_reduce_sum(sum_sq, smem, blockDim.x);
+    float rms = rsqrtf(total / hidden_dim + eps);
+
+    // Normalize with 2x unroll + __ldg()
+    float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
+    int64_t unroll2_limit = (num_vec / 2) * 2;
+
+    for (int64_t i = threadIdx.x; i < unroll2_limit; i += blockDim.x * 2) {
+        // Vector 0
+        {
+            float4 vin = input_vec[i];
+            float4 vout;
+            float4 wv, bv;
+            if (use_affine) {
+                wv = __ldg(&weight_vec[i]);
+                bv = __ldg(&bias_vec[i]);
+            }
+            typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+            const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+            const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+            const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+            #pragma unroll
+            for (int j = 0; j < vec_width; ++j) {
+                float val = ConvertOps<T>::to(ie[j]) * rms;
+                if (use_affine) {
+                    val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                }
+                ConvertOps<T>::elem_store(oe + j, val);
+            }
+            output_vec[i] = vout;
+        }
+        // Vector 1
+        {
+            float4 vin = input_vec[i + blockDim.x];
+            float4 vout;
+            float4 wv, bv;
+            if (use_affine) {
+                wv = __ldg(&weight_vec[i + blockDim.x]);
+                bv = __ldg(&bias_vec[i + blockDim.x]);
+            }
+            typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+            const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+            const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+            const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+            #pragma unroll
+            for (int j = 0; j < vec_width; ++j) {
+                float val = ConvertOps<T>::to(ie[j]) * rms;
+                if (use_affine) {
+                    val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                }
+                ConvertOps<T>::elem_store(oe + j, val);
+            }
+            output_vec[i + blockDim.x] = vout;
+        }
+    }
+    for (int64_t i = unroll2_limit + threadIdx.x; i < num_vec; i += blockDim.x) {
+        float4 vin = input_vec[i];
+        float4 vout;
+        float4 wv, bv;
+        if (use_affine) {
+            wv = __ldg(&weight_vec[i]);
+            bv = __ldg(&bias_vec[i]);
+        }
+        typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+        const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+        const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+        const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+        #pragma unroll
+        for (int j = 0; j < vec_width; ++j) {
+            float val = ConvertOps<T>::to(ie[j]) * rms;
+            if (use_affine) {
+                val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+            }
+            ConvertOps<T>::elem_store(oe + j, val);
+        }
+        output_vec[i] = vout;
+    }
+    for (int64_t i = vec_dim + threadIdx.x; i < hidden_dim; i += blockDim.x) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        float out = x * rms;
+        if (use_affine) {
+            out = out * __ldg(&weight[i]) + __ldg(&bias[i]);
+        }
+        output[row_offset + i] = ConvertOps<T>::from(out);
+    }
+}
+
 // Dynamic block + __ldg kernel (v20-style, block_size=512 for D>=4096)
 template<typename T, int vec_width>
 __global__ void rmsnorm_v13_dynldg_kernel(
@@ -338,6 +461,15 @@ static void launch_strategy_v13(int strategy, const T* input, T* output,
             if (aligned) {
                 launch_const_dim_v13<T>(input, output, weight, bias,
                     batch_size, hidden_dim, eps, use_affine, block_size, smem);
+            } else {
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                    input, output, weight, bias, hidden_dim, eps, use_affine);
+            }
+            break;
+        case 4:  // v19-style: 2x unroll + __ldg (fp32 large)
+            if (aligned) {
+                rmsnorm_v13_unroll2_kernel<T, vw><<<batch_size, block_size, smem>>>(
+                    input, output, weight, bias, hidden_dim, eps, use_affine);
             } else {
                 rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
@@ -464,12 +596,15 @@ void rmsnorm_v13_autotune_cuda(
                 strategies[num_strategies++] = 3;
             }
         } else {
-            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if small D)
+            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=4096)
             strategies[num_strategies++] = 0;
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
             if (hidden_dim <= 4096) {
                 strategies[num_strategies++] = 3;
+            }
+            if (hidden_dim >= 4096) {
+                strategies[num_strategies++] = 4;
             }
         }
 
