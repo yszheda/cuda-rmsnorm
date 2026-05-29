@@ -61,6 +61,7 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v26_smem_input.cu
     src/kernels/rmsnorm_v27_half2.cu
     src/kernels/rmsnorm_v28_vec_half2.cu
+    src/kernels/rmsnorm_v29_const_dim.cu
 )
 
 set(BINDING_SOURCES

@@ -267,4 +267,14 @@ void rmsnorm_v28_vec_half2_cuda(
     bool use_affine
 );
 
+// V29: Compile-time constant hidden_dim (fully unrolled for common sizes)
+void rmsnorm_v29_const_dim_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
