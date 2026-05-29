@@ -257,4 +257,14 @@ void rmsnorm_v27_half2_cuda(
     bool use_affine
 );
 
+// V28: Vectorized sum-of-squares + half2 normalize
+void rmsnorm_v28_vec_half2_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
