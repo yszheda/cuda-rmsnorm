@@ -227,4 +227,14 @@ void rmsnorm_v23_warp_persistent_cuda(
     bool use_affine
 );
 
+// V25: 2x ILP register blocking + dynamic block + __ldg
+void rmsnorm_v25_best_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
