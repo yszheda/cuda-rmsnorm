@@ -59,6 +59,7 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v23_warp_persistent.cu
     src/kernels/rmsnorm_v25_best.cu
     src/kernels/rmsnorm_v26_smem_input.cu
+    src/kernels/rmsnorm_v27_half2.cu
 )
 
 set(BINDING_SOURCES

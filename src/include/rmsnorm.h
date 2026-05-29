@@ -247,4 +247,14 @@ void rmsnorm_v26_smem_input_cuda(
     bool use_affine
 );
 
+// V27: Half2 native arithmetic (__hfma2/__hmul2) for fp16/bf16
+void rmsnorm_v27_half2_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H

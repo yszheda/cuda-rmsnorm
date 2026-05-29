@@ -63,6 +63,7 @@ void rmsnorm_cuda_wrapper(
         case 23: rmsnorm_v23_warp_persistent_cuda(output, input, weight, bias, eps, use_affine); break;
         case 25: rmsnorm_v25_best_cuda(output, input, weight, bias, eps, use_affine); break;
         case 26: rmsnorm_v26_smem_input_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 27: rmsnorm_v27_half2_cuda(output, input, weight, bias, eps, use_affine); break;
         default:
             // Use the best version (v15) as default
             rmsnorm_v15_vec_unroll_cuda(output, input, weight, bias, eps, use_affine);
