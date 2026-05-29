@@ -148,6 +148,88 @@ __global__ void rmsnorm_v13_vec_kernel(
     }
 }
 
+// Compile-time constant hidden_dim kernel (v29-style)
+template<typename T, int vec_width, int HIDDEN_DIM>
+__global__ void rmsnorm_v13_const_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    float eps,
+    bool use_affine
+) {
+    int64_t row_idx = blockIdx.x;
+    int64_t row_offset = row_idx * HIDDEN_DIM;
+    extern __shared__ char smem_raw[];
+    float* smem = reinterpret_cast<float*>(smem_raw);
+    static constexpr int64_t NUM_VEC = HIDDEN_DIM / vec_width;
+    const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
+    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
+    float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
+
+    float sum_sq = 0.0f;
+    for (int64_t i = threadIdx.x; i < NUM_VEC; i += blockDim.x) {
+        float4 v = input_vec[i];
+        const typename ConvertOps<T>::vec_elem_t* e = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
+        #pragma unroll
+        for (int j = 0; j < vec_width; ++j) {
+            float x = ConvertOps<T>::to(e[j]);
+            sum_sq += x * x;
+        }
+    }
+    float total = block_reduce_sum(sum_sq, smem, blockDim.x);
+    float rms = rsqrtf(total / HIDDEN_DIM + eps);
+
+    for (int64_t i = threadIdx.x; i < NUM_VEC; i += blockDim.x) {
+        float4 vin = input_vec[i];
+        float4 vout;
+        float4 wv, bv;
+        if (use_affine) {
+            wv = __ldg(&weight_vec[i]);
+            bv = __ldg(&bias_vec[i]);
+        }
+        typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+        const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+        const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+        const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+        #pragma unroll
+        for (int j = 0; j < vec_width; ++j) {
+            float val = ConvertOps<T>::to(ie[j]) * rms;
+            if (use_affine) {
+                val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+            }
+            ConvertOps<T>::elem_store(oe + j, val);
+        }
+        output_vec[i] = vout;
+    }
+}
+
+template<typename T>
+static void launch_const_dim_v13(const T* input, T* output,
+    const T* weight, const T* bias, int64_t batch_size, int64_t hidden_dim,
+    float eps, bool use_affine, int block_size, size_t smem) {
+    if (hidden_dim == 128) {
+        rmsnorm_v13_const_kernel<T, ConvertOps<T>::vec_width, 128>
+            <<<batch_size, block_size, smem>>>(input, output, weight, bias, eps, use_affine);
+    } else if (hidden_dim == 256) {
+        rmsnorm_v13_const_kernel<T, ConvertOps<T>::vec_width, 256>
+            <<<batch_size, block_size, smem>>>(input, output, weight, bias, eps, use_affine);
+    } else if (hidden_dim == 512) {
+        rmsnorm_v13_const_kernel<T, ConvertOps<T>::vec_width, 512>
+            <<<batch_size, block_size, smem>>>(input, output, weight, bias, eps, use_affine);
+    } else if (hidden_dim == 1024) {
+        rmsnorm_v13_const_kernel<T, ConvertOps<T>::vec_width, 1024>
+            <<<batch_size, block_size, smem>>>(input, output, weight, bias, eps, use_affine);
+    } else if (hidden_dim == 2048) {
+        rmsnorm_v13_const_kernel<T, ConvertOps<T>::vec_width, 2048>
+            <<<batch_size, block_size, smem>>>(input, output, weight, bias, eps, use_affine);
+    } else if (hidden_dim == 4096) {
+        rmsnorm_v13_const_kernel<T, ConvertOps<T>::vec_width, 4096>
+            <<<batch_size, block_size, smem>>>(input, output, weight, bias, eps, use_affine);
+    }
+}
+
 // Dynamic block + __ldg kernel (v20-style, block_size=512 for D>=4096)
 template<typename T, int vec_width>
 __global__ void rmsnorm_v13_dynldg_kernel(
@@ -220,7 +302,7 @@ __global__ void rmsnorm_v13_dynldg_kernel(
     }
 }
 
-// Launch a specific strategy
+// Launch a specific strategy (now 4 strategies: 0=scalar, 1=v15, 2=v20, 3=v29-const)
 template<typename T>
 static void launch_strategy_v13(int strategy, const T* input, T* output,
                                  const T* weight, const T* bias,
@@ -247,6 +329,15 @@ static void launch_strategy_v13(int strategy, const T* input, T* output,
             if (aligned) {
                 rmsnorm_v13_dynldg_kernel<T, vw><<<batch_size, block_size, smem>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
+            } else {
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                    input, output, weight, bias, hidden_dim, eps, use_affine);
+            }
+            break;
+        case 3:  // compile-time constant hidden_dim (v29-style)
+            if (aligned) {
+                launch_const_dim_v13<T>(input, output, weight, bias,
+                    batch_size, hidden_dim, eps, use_affine, block_size, smem);
             } else {
                 rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
@@ -362,18 +453,24 @@ void rmsnorm_v13_autotune_cuda(
         best_strategy = 0;
     } else {
         // Determine which strategies to probe
-        int strategies[3];
+        int strategies[4];
         int num_strategies = 0;
 
         if (dtype_code > 0) {
-            // fp16/bf16: probe vectorized (1) and dynldg (2)
+            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D)
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
+            if (hidden_dim <= 4096) {
+                strategies[num_strategies++] = 3;
+            }
         } else {
-            // fp32: probe scalar (0), vectorized (1), dynldg (2)
+            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if small D)
             strategies[num_strategies++] = 0;
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
+            if (hidden_dim <= 4096) {
+                strategies[num_strategies++] = 3;
+            }
         }
 
         for (int s = 0; s < num_strategies; ++s) {
@@ -386,11 +483,40 @@ void rmsnorm_v13_autotune_cuda(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
                 input.scalar_type(), "rmsnorm_v13_autotune",
                 [&]() {
-                    t = time_strategy_v13<scalar_t>(strat,
-                        input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                        weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                        batch_size, hidden_dim, eps, use_affine,
-                        block, smem, aligned, iterations);
+                    if (strat == 3) {
+                        launch_const_dim_v13<scalar_t>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            batch_size, hidden_dim, eps, use_affine, block, smem);
+                        // Time const-dim
+                        cudaEvent_t start, stop;
+                        cudaEventCreate(&start);
+                        cudaEventCreate(&stop);
+                        rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                        cudaDeviceSynchronize();
+                        cudaEventRecord(start);
+                        for (int j = 0; j < iterations; ++j) {
+                            launch_const_dim_v13<scalar_t>(
+                                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                                weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                                batch_size, hidden_dim, eps, use_affine, block, smem);
+                        }
+                        cudaEventRecord(stop);
+                        cudaEventSynchronize(stop);
+                        cudaEventElapsedTime(&t, start, stop);
+                        cudaEventDestroy(start);
+                        cudaEventDestroy(stop);
+                        t /= iterations;
+                    } else {
+                        t = time_strategy_v13<scalar_t>(strat,
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            batch_size, hidden_dim, eps, use_affine,
+                            block, smem, aligned, iterations);
+                    }
                 });
 
             if (t < best_time) {
