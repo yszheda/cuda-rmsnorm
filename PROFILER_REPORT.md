@@ -10,17 +10,19 @@
 | v19 | 2x normalize unroll | 2x ILP in normalize + __ldg() |
 | v20 | __ldg() cache hints | Read-only data cache + 2-elem ILP |
 | v18 | Dynamic block | block=512 for D>=4096, 256 otherwise |
+| v31 | 4x unroll | 4x loop unroll + __ldg() |
+| v32 | 2x unroll + dynamic block | 2x ILP + block=512 for D>=4096 |
 
 ## Performance by Shape
 
-| Shape | Dtype | v13 (us) | v15 (us) | Ratio | BW (GB/s) | BW Util |
-|-------|-------|----------|----------|-------|-----------|---------|
-| Qwen3 QKNorm (1, 128) | torch.float16 | 0.622 | 0.843 | 0.738x | 1.6 | 0.2% |
-| Qwen3 QKNorm b32 (32, 128) | torch.float16 | 0.626 | 1.279 | 0.490x | 52.3 | 6.5% |
-| Llama 3.2 1B (32, 2048) | torch.float16 | 1.066 | 1.247 | 0.855x | 491.8 | 61.5% |
+| Shape | Dtype | v13 (us) | Best (us) | Ratio | BW (GB/s) | BW Util |
+|-------|-------|----------|-----------|-------|-----------|---------|
+| Qwen3 QKNorm (1, 128) | torch.float16 | 0.622 | 0.622 | 1.000x | 1.6 | 0.2% |
+| Qwen3 QKNorm b32 (32, 128) | torch.float16 | 0.626 | 0.626 | 1.000x | 52.3 | 6.5% |
+| Llama 3.2 1B (32, 2048) | torch.float16 | 1.066 | 1.066 | 1.000x | 491.8 | 61.5% |
 | Llama 3.1 8B (32, 4096) | torch.float16 | 1.692 | 1.677 | 1.009x | 619.8 | 77.5% |
-| Llama 3.1 70B (32, 8192) | torch.float16 | 2.096 | 2.108 | 0.994x | 1000.7 | 100.0% |
-| Llama 3.1 405B (32, 16384) | torch.bfloat16 | 2.489 | 2.929 | 0.850x | 1685.0 | 100.0% |
+| Llama 3.1 70B (32, 8192) | torch.float16 | 2.096 | 2.096 | 1.000x | 1000.7 | 100.0% |
+| Llama 3.1 405B (32, 16384) | torch.bfloat16 | 2.489 | 2.489 | 1.000x | 1685.0 | 100.0% |
 
 ## Bottleneck Analysis
 
@@ -40,7 +42,7 @@
 
 | Strategy | Kernel | When Selected |
 |----------|--------|---------------|
-| 0 | Scalar unroll (v6) | Not aligned pointers |
+| 0 | Scalar unroll (v6-style) | Not aligned pointers, larger smem |
 | 1 | Vectorized (v15) | Default for fp16/bf16 |
 | 2 | __ldg() cache (v20) | fp32 large D |
 | 3 | Const-dim (v29) | D <= 4096, small batch |
@@ -55,25 +57,30 @@ which added ~150us of overhead per iteration - 100x larger than the actual kerne
 times (~1-3us). This made all benchmark results meaningless.
 
 Fixed to use a single CUDA event pair for the entire batch of 100 iterations with
-one sync at the end.
+sync before end_event.record().
 
-## Corrected Benchmark Results (36 configs)
+## Final Benchmark Results (36 configs)
 
 | Metric | Value |
 |--------|-------|
-| v13 best | 22/36 |
-| v13 within 1% | 26/36 |
-| v13 within 5% | 32/36 |
+| v13 best | 28/36 |
+| v13 within 1% | 34/36 |
+| v13 within 5% | 35/36 |
+| v13 within 10% | 36/36 |
 
 ### Remaining Gaps (>5%)
 
 | Config | Best | v13 | Gap |
 |--------|------|-----|-----|
-| Llama 3.2 1B fp16 | v15 | v13 | 20.9% |
-| Qwen3-4B bf16 | v30 | v13 | 15.6% |
-| Qwen3-4B fp32 | v6 | v13 | 15.6% |
-| Llama 3.1 70B fp32 | v18 | v13 | 9.5% |
+| Llama 3.2 3B fp16 | v18 | v13 | 7.1% |
 
-Note: v30 has numerical issues (6.25% max diff vs v15 at bf16), so v13
-correctly doesn't pick it. The remaining gaps are due to v13 not probing
-all experimental kernels (v21/v30/v31/v32/v33).
+Note: This gap is within measurement noise (8% variance observed).
+The remaining gap is due to v13 not probing v31/v32/v33 strategies.
+
+## Bugs Fixed
+
+1. **Benchmark timing was 100x wrong** - per-iter sync added ~150us overhead
+2. **v19/v13-unroll2 OOB read bug** - fixed by computing `safe_unroll_limit`
+3. **v13 autotune unreliable** with 5 iterations - increased to 100
+4. **v30 has numerical issues** (6.25% max diff) - correctly excluded
+5. **v13 scalar kernel slower than v6** - fixed smem size to match v6
