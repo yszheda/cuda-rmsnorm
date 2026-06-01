@@ -277,4 +277,14 @@ void rmsnorm_v29_const_dim_cuda(
     bool use_affine
 );
 
+// V30: Fully native half2 arithmetic (__hmul2/__hfma2) throughout
+void rmsnorm_v30_native_half2_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
