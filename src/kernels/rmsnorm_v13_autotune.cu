@@ -638,7 +638,6 @@ void rmsnorm_v13_autotune_cuda(
         auto it = g_autotune_cache.find(key);
         if (it != g_autotune_cache.end()) {
             int block_size = 256;
-            if (it->second.best_strategy == 2 && hidden_dim >= 4096) block_size = 512;
             if (it->second.best_strategy == 4 && hidden_dim >= 2048) block_size = 512;
             size_t smem = ((block_size + 31) / 32) * sizeof(float);
             AT_DISPATCH_FLOATING_TYPES_AND2(
@@ -725,8 +724,7 @@ void rmsnorm_v13_autotune_cuda(
 
         for (int s = 0; s < num_strategies; ++s) {
             int strat = strategies[s];
-            int block = (strat == 2 && hidden_dim >= 4096) ? 512 : 256;
-            if (strat == 4) block = (hidden_dim >= 2048) ? 512 : 256;
+            int block = (strat == 4 && hidden_dim >= 2048) ? 512 : 256;
             size_t smem = ((block + 31) / 32) * sizeof(float);
 
             float t;
@@ -807,8 +805,7 @@ void rmsnorm_v13_autotune_cuda(
     }
 
     // Launch best strategy
-    int block = (best_strategy == 2 && hidden_dim >= 4096) ? 512 : 256;
-    if (best_strategy == 4) block = (hidden_dim >= 2048) ? 512 : 256;
+    int block = (best_strategy == 4 && hidden_dim >= 2048) ? 512 : 256;
     size_t smem = ((block + 31) / 32) * sizeof(float);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
