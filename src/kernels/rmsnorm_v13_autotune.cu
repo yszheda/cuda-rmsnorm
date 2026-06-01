@@ -496,17 +496,13 @@ __global__ void rmsnorm_v13_dynldg_kernel(
         const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
         const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
         const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
-        // Process 2 elements at a time for ILP
         #pragma unroll
-        for (int j = 0; j < vec_width; j += 2) {
-            float v0 = ConvertOps<T>::to(ie[j]) * rms;
-            float v1 = ConvertOps<T>::to(ie[j + 1]) * rms;
+        for (int j = 0; j < vec_width; ++j) {
+            float val = ConvertOps<T>::to(ie[j]) * rms;
             if (use_affine) {
-                v0 = v0 * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
-                v1 = v1 * ConvertOps<T>::to(we[j + 1]) + ConvertOps<T>::to(be[j + 1]);
+                val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
             }
-            ConvertOps<T>::elem_store(oe + j, v0);
-            ConvertOps<T>::elem_store(oe + j + 1, v1);
+            ConvertOps<T>::elem_store(oe + j, val);
         }
         output_vec[i] = vout;
     }
