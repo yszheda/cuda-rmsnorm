@@ -353,6 +353,89 @@ __global__ void rmsnorm_v13_unroll2_kernel(
     }
 }
 
+// Warp-persistent kernel for tiny shapes (batch<=8, D<=1024)
+template<typename T, int vec_width>
+__global__ void rmsnorm_v13_warp_kernel(
+    const T* __restrict__ input,
+    T* __restrict__ output,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    int64_t total_rows,
+    int64_t hidden_dim,
+    float eps,
+    bool use_affine
+) {
+    int warp_id = threadIdx.x / 32;
+    int lane = threadIdx.x % 32;
+    int num_warps = 8;  // 256 threads / 32
+
+    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
+
+    int64_t vec_dim = (hidden_dim / vec_width) * vec_width;
+    int64_t num_vec = vec_dim / vec_width;
+
+    for (int64_t row_idx = warp_id; row_idx < total_rows; row_idx += num_warps) {
+        int64_t row_offset = row_idx * hidden_dim;
+        const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
+
+        float sum_sq = 0.0f;
+        for (int64_t i = lane; i < num_vec; i += 32) {
+            float4 v = input_vec[i];
+            const typename ConvertOps<T>::vec_elem_t* e =
+                reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
+            #pragma unroll
+            for (int j = 0; j < vec_width; ++j) {
+                float x = ConvertOps<T>::to(e[j]);
+                sum_sq += x * x;
+            }
+        }
+        for (int64_t i = vec_dim + lane; i < hidden_dim; i += 32) {
+            float x = ConvertOps<T>::to(input[row_offset + i]);
+            sum_sq += x * x;
+        }
+
+        sum_sq = warp_reduce_sum(sum_sq);
+        float rms = rsqrtf(sum_sq / hidden_dim + eps);
+
+        float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
+        for (int64_t i = lane; i < num_vec; i += 32) {
+            float4 vin = input_vec[i];
+            float4 vout;
+            float4 wv, bv;
+            if (use_affine) {
+                wv = weight_vec[i];
+                bv = bias_vec[i];
+            }
+            typename ConvertOps<T>::vec_elem_t* oe =
+                reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+            const typename ConvertOps<T>::vec_elem_t* ie =
+                reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+            const typename ConvertOps<T>::vec_elem_t* we =
+                reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+            const typename ConvertOps<T>::vec_elem_t* be =
+                reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+            #pragma unroll
+            for (int j = 0; j < vec_width; ++j) {
+                float val = ConvertOps<T>::to(ie[j]) * rms;
+                if (use_affine) {
+                    val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                }
+                ConvertOps<T>::elem_store(oe + j, val);
+            }
+            output_vec[i] = vout;
+        }
+        for (int64_t i = vec_dim + lane; i < hidden_dim; i += 32) {
+            float x = ConvertOps<T>::to(input[row_offset + i]);
+            float out = x * rms;
+            if (use_affine) {
+                out = out * weight[i] + bias[i];
+            }
+            output[row_offset + i] = ConvertOps<T>::from(out);
+        }
+    }
+}
+
 // Dynamic block + __ldg kernel (v20-style, block_size=512 for D>=4096)
 template<typename T, int vec_width>
 __global__ void rmsnorm_v13_dynldg_kernel(
@@ -475,6 +558,15 @@ static void launch_strategy_v13(int strategy, const T* input, T* output,
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
+        case 5:  // warp-persistent (tiny shapes: batch<=8, D<=1024)
+            if (aligned) {
+                rmsnorm_v13_warp_kernel<T, vw><<<1, 256>>>(
+                    input, output, weight, bias, batch_size, hidden_dim, eps, use_affine);
+            } else {
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, smem>>>(
+                    input, output, weight, bias, hidden_dim, eps, use_affine);
+            }
+            break;
     }
 }
 
@@ -585,18 +677,21 @@ void rmsnorm_v13_autotune_cuda(
         best_strategy = 0;
     } else {
         // Determine which strategies to probe
-        int strategies[4];
+        int strategies[6];
         int num_strategies = 0;
 
         if (dtype_code > 0) {
-            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D)
+            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), warp (5 if tiny)
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
             if (hidden_dim <= 4096) {
                 strategies[num_strategies++] = 3;
             }
+            if (batch_size <= 8 && hidden_dim <= 1024) {
+                strategies[num_strategies++] = 5;
+            }
         } else {
-            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=4096)
+            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=4096), warp (5 if tiny)
             strategies[num_strategies++] = 0;
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
@@ -605,6 +700,9 @@ void rmsnorm_v13_autotune_cuda(
             }
             if (hidden_dim >= 4096) {
                 strategies[num_strategies++] = 4;
+            }
+            if (batch_size <= 8 && hidden_dim <= 1024) {
+                strategies[num_strategies++] = 5;
             }
         }
 
@@ -638,6 +736,33 @@ void rmsnorm_v13_autotune_cuda(
                                 input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
                                 weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
                                 batch_size, hidden_dim, eps, use_affine, block, smem);
+                        }
+                        cudaEventRecord(stop);
+                        cudaEventSynchronize(stop);
+                        cudaEventElapsedTime(&t, start, stop);
+                        cudaEventDestroy(start);
+                        cudaEventDestroy(stop);
+                        t /= iterations;
+                    } else if (strat == 5) {
+                        // Warp-persistent: always 1 block, 256 threads
+                        rmsnorm_v13_warp_kernel<scalar_t, ConvertOps<scalar_t>::vec_width><<<1, 256>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            batch_size, hidden_dim, eps, use_affine);
+                        cudaEvent_t start, stop;
+                        cudaEventCreate(&start);
+                        cudaEventCreate(&stop);
+                        rmsnorm_v13_scalar_kernel<scalar_t><<<1, 256, smem>>>(
+                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                            hidden_dim, eps, use_affine);
+                        cudaDeviceSynchronize();
+                        cudaEventRecord(start);
+                        for (int j = 0; j < iterations; ++j) {
+                            rmsnorm_v13_warp_kernel<scalar_t, ConvertOps<scalar_t>::vec_width><<<1, 256>>>(
+                                input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
+                                weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
+                                batch_size, hidden_dim, eps, use_affine);
                         }
                         cudaEventRecord(stop);
                         cudaEventSynchronize(stop);
