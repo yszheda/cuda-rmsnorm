@@ -45,3 +45,35 @@
 | 3 | Const-dim (v29) | D <= 4096, small batch |
 | 4 | 2x unroll (v19) | D >= 2048, large batch |
 | 5 | Warp-persistent | batch <= 8, D <= 1024 |
+
+## Benchmark Timing Fix
+
+The original benchmark used per-iteration CUDA event recording and synchronization,
+which added ~150us of overhead per iteration - 100x larger than the actual kernel
+times (~1-3us). This made all benchmark results meaningless.
+
+Fixed to use a single CUDA event pair for the entire batch of 100 iterations with
+one sync at the end.
+
+## Corrected Benchmark Results (36 configs)
+
+| Metric | Value |
+|--------|-------|
+| v13 best | 22/36 |
+| v13 within 1% | 26/36 |
+| v13 within 5% | 28/36 |
+
+### Remaining Gaps (>5%)
+
+| Config | Best | v13 | Gap |
+|--------|------|-----|-----|
+| Llama 3.2 3B fp16 | v31 | v13 | 16.5% |
+| Qwen3-1.7B fp16 | v15 | v13 | 19.9% |
+| Qwen3-4B fp16 | v30 | v13 | 18.1% |
+| Qwen3-4B bf16 | v30 | v13 | 15.6% |
+| Qwen3-4B fp32 | v6 | v13 | 15.7% |
+| Llama 3.1 8B fp32 | v21 | v13 | 16.1% |
+| Llama 3.1 70B fp32 | v21 | v13 | 10.3% |
+| Qwen3-14B bf16 | v18 | v13 | 15.2% |
+
+These gaps are real - v13's autotune doesn't probe v21/v30/v31 strategies.
