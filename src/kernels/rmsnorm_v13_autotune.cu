@@ -227,6 +227,10 @@ static void launch_const_dim_v13(const T* input, T* output,
     } else if (hidden_dim == 4096) {
         rmsnorm_v13_const_kernel<T, ConvertOps<T>::vec_width, 4096>
             <<<batch_size, block_size, smem>>>(input, output, weight, bias, eps, use_affine);
+    } else {
+        // Fallback: launch vectorized kernel for unsupported hidden_dim
+        rmsnorm_v13_vec_kernel<T, ConvertOps<T>::vec_width><<<batch_size, block_size, smem>>>(
+            input, output, weight, bias, hidden_dim, eps, use_affine);
     }
 }
 
@@ -709,6 +713,7 @@ void rmsnorm_v13_autotune_cuda(
         for (int s = 0; s < num_strategies; ++s) {
             int strat = strategies[s];
             int block = (strat == 2 && hidden_dim >= 4096) ? 512 : 256;
+            if (strat == 4) block = (hidden_dim >= 2048) ? 512 : 256;
             size_t smem = ((block + 31) / 32) * sizeof(float);
 
             float t;
@@ -717,18 +722,14 @@ void rmsnorm_v13_autotune_cuda(
                 input.scalar_type(), "rmsnorm_v13_autotune",
                 [&]() {
                     if (strat == 3) {
+                        // Time const-dim with proper warmup
+                        cudaEvent_t start, stop;
+                        cudaEventCreate(&start);
+                        cudaEventCreate(&stop);
                         launch_const_dim_v13<scalar_t>(
                             input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
                             weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
                             batch_size, hidden_dim, eps, use_affine, block, smem);
-                        // Time const-dim
-                        cudaEvent_t start, stop;
-                        cudaEventCreate(&start);
-                        cudaEventCreate(&stop);
-                        rmsnorm_v13_scalar_kernel<scalar_t><<<batch_size, block, smem>>>(
-                            input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
-                            weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
-                            hidden_dim, eps, use_affine);
                         cudaDeviceSynchronize();
                         cudaEventRecord(start);
                         for (int j = 0; j < iterations; ++j) {
