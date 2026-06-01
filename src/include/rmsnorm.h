@@ -287,4 +287,14 @@ void rmsnorm_v30_native_half2_cuda(
     bool use_affine
 );
 
+// V31: fp32-specific 4x unroll + __ldg(), fp16/bf16 = v15-style
+void rmsnorm_v31_fp32_unroll_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
