@@ -57,10 +57,14 @@ __global__ void rmsnorm_v19_vec_kernel(
     const float4* weight_vec = reinterpret_cast<const float4*>(weight);
     const float4* bias_vec = reinterpret_cast<const float4*>(bias);
 
-    int64_t unroll2_limit = (num_vec / 2) * 2;
-
     // Unrolled loop: 2 vectors per iteration
-    for (int64_t i = threadIdx.x; i < unroll2_limit; i += blockDim.x * 2) {
+    // Only unroll if we have enough vectors to safely read i and i+blockDim.x
+    int64_t safe_unroll_limit = 0;
+    if (num_vec > blockDim.x) {
+        safe_unroll_limit = ((num_vec - blockDim.x) / (blockDim.x * 2)) * (blockDim.x * 2);
+    }
+
+    for (int64_t i = threadIdx.x; i < safe_unroll_limit; i += blockDim.x * 2) {
         // Vector 0
         float4 vin0 = input_vec[i];
         float4 vout0;
@@ -106,8 +110,8 @@ __global__ void rmsnorm_v19_vec_kernel(
         output_vec[i + blockDim.x] = vout1;
     }
 
-    // Tail: odd vector
-    for (int64_t i = unroll2_limit + threadIdx.x; i < num_vec; i += blockDim.x) {
+    // Tail: remaining vectors
+    for (int64_t i = safe_unroll_limit + threadIdx.x; i < num_vec; i += blockDim.x) {
         float4 vin = input_vec[i];
         float4 vout;
         float4 wv, bv;

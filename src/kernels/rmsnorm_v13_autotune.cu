@@ -277,11 +277,14 @@ __global__ void rmsnorm_v13_unroll2_kernel(
     float total = block_reduce_sum(sum_sq, smem, blockDim.x);
     float rms = rsqrtf(total / hidden_dim + eps);
 
-    // Normalize with 2x unroll + __ldg()
+    // 2x unrolled normalize + __ldg()
     float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
-    int64_t unroll2_limit = (num_vec / 2) * 2;
+    int64_t safe_unroll_limit = 0;
+    if (num_vec > blockDim.x) {
+        safe_unroll_limit = ((num_vec - blockDim.x) / (blockDim.x * 2)) * (blockDim.x * 2);
+    }
 
-    for (int64_t i = threadIdx.x; i < unroll2_limit; i += blockDim.x * 2) {
+    for (int64_t i = threadIdx.x; i < safe_unroll_limit; i += blockDim.x * 2) {
         // Vector 0
         {
             float4 vin = input_vec[i];
@@ -329,7 +332,7 @@ __global__ void rmsnorm_v13_unroll2_kernel(
             output_vec[i + blockDim.x] = vout;
         }
     }
-    for (int64_t i = unroll2_limit + threadIdx.x; i < num_vec; i += blockDim.x) {
+    for (int64_t i = safe_unroll_limit + threadIdx.x; i < num_vec; i += blockDim.x) {
         float4 vin = input_vec[i];
         float4 vout;
         float4 wv, bv;
@@ -676,7 +679,7 @@ void rmsnorm_v13_autotune_cuda(
     // - fp32: v20 usually wins over v15, v6 for small shapes
     // - Not aligned: scalar only
     int warmup = 1;
-    int iterations = 5;
+    int iterations = 20;
 
     int best_strategy = 1;  // default: vectorized
     float best_time = 1e9f;
