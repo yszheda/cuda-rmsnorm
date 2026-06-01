@@ -307,4 +307,14 @@ void rmsnorm_v32_fp32_unroll_cuda(
     bool use_affine
 );
 
+// V33: Adaptive unroll (4x D<=4096, 2x D>4096) + __ldg()
+void rmsnorm_v33_adaptive_unroll_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H

@@ -67,6 +67,9 @@ void rmsnorm_cuda_wrapper(
         case 28: rmsnorm_v28_vec_half2_cuda(output, input, weight, bias, eps, use_affine); break;
         case 29: rmsnorm_v29_const_dim_cuda(output, input, weight, bias, eps, use_affine); break;
         case 30: rmsnorm_v30_native_half2_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 31: rmsnorm_v31_fp32_unroll_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 32: rmsnorm_v32_fp32_unroll_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 33: rmsnorm_v33_adaptive_unroll_cuda(output, input, weight, bias, eps, use_affine); break;
         default:
             // Use the best version (v15) as default
             rmsnorm_v15_vec_unroll_cuda(output, input, weight, bias, eps, use_affine);
