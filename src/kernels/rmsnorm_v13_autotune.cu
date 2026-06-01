@@ -678,8 +678,8 @@ void rmsnorm_v13_autotune_cuda(
     // - fp16/bf16 + aligned: v15 or v20 compete (probe both)
     // - fp32: v20 usually wins over v15, v6 for small shapes
     // - Not aligned: scalar only
-    int warmup = 1;
-    int iterations = 5;
+    int warmup = 5;
+    int iterations = 100;
 
     int best_strategy = 1;  // default: vectorized
     float best_time = 1e9f;
