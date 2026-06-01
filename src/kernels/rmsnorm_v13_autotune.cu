@@ -128,13 +128,17 @@ __global__ void rmsnorm_v13_vec_kernel(
         const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
         const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
         const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+        // Process 2 elements at a time for ILP
         #pragma unroll
-        for (int j = 0; j < vec_width; ++j) {
-            float val = ConvertOps<T>::to(ie[j]) * rms;
+        for (int j = 0; j < vec_width; j += 2) {
+            float v0 = ConvertOps<T>::to(ie[j]) * rms;
+            float v1 = ConvertOps<T>::to(ie[j + 1]) * rms;
             if (use_affine) {
-                val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                v0 = v0 * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                v1 = v1 * ConvertOps<T>::to(we[j + 1]) + ConvertOps<T>::to(be[j + 1]);
             }
-            ConvertOps<T>::elem_store(oe + j, val);
+            ConvertOps<T>::elem_store(oe + j, v0);
+            ConvertOps<T>::elem_store(oe + j + 1, v1);
         }
         output_vec[i] = vout;
     }
@@ -492,13 +496,17 @@ __global__ void rmsnorm_v13_dynldg_kernel(
         const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
         const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
         const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+        // Process 2 elements at a time for ILP
         #pragma unroll
-        for (int j = 0; j < vec_width; ++j) {
-            float val = ConvertOps<T>::to(ie[j]) * rms;
+        for (int j = 0; j < vec_width; j += 2) {
+            float v0 = ConvertOps<T>::to(ie[j]) * rms;
+            float v1 = ConvertOps<T>::to(ie[j + 1]) * rms;
             if (use_affine) {
-                val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                v0 = v0 * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                v1 = v1 * ConvertOps<T>::to(we[j + 1]) + ConvertOps<T>::to(be[j + 1]);
             }
-            ConvertOps<T>::elem_store(oe + j, val);
+            ConvertOps<T>::elem_store(oe + j, v0);
+            ConvertOps<T>::elem_store(oe + j + 1, v1);
         }
         output_vec[i] = vout;
     }
@@ -630,6 +638,8 @@ void rmsnorm_v13_autotune_cuda(
         auto it = g_autotune_cache.find(key);
         if (it != g_autotune_cache.end()) {
             int block_size = 256;
+            if (it->second.best_strategy == 2 && hidden_dim >= 4096) block_size = 512;
+            if (it->second.best_strategy == 4 && hidden_dim >= 2048) block_size = 512;
             size_t smem = ((block_size + 31) / 32) * sizeof(float);
             AT_DISPATCH_FLOATING_TYPES_AND2(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
@@ -685,11 +695,14 @@ void rmsnorm_v13_autotune_cuda(
         int num_strategies = 0;
 
         if (dtype_code > 0) {
-            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), warp (5 if tiny)
+            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), v19-unroll (4 if D>=4096), warp (5 if tiny)
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
             if (hidden_dim <= 4096) {
                 strategies[num_strategies++] = 3;
+            }
+            if (hidden_dim >= 4096) {
+                strategies[num_strategies++] = 4;
             }
             if (batch_size <= 8 && hidden_dim <= 1024) {
                 strategies[num_strategies++] = 5;
@@ -795,6 +808,7 @@ void rmsnorm_v13_autotune_cuda(
 
     // Launch best strategy
     int block = (best_strategy == 2 && hidden_dim >= 4096) ? 512 : 256;
+    if (best_strategy == 4) block = (hidden_dim >= 2048) ? 512 : 256;
     size_t smem = ((block + 31) / 32) * sizeof(float);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
