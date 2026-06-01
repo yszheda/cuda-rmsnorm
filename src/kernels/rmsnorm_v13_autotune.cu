@@ -578,6 +578,15 @@ static void launch_strategy_v13(int strategy, const T* input, T* output,
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
+        case 6:  // v18-style: dynamic block (512 for D>=4096) + __ldg()
+            if (aligned) {
+                rmsnorm_v13_dynldg_kernel<T, vw><<<batch_size, block_size, smem>>>(
+                    input, output, weight, bias, hidden_dim, eps, use_affine);
+            } else {
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                    input, output, weight, bias, hidden_dim, eps, use_affine);
+            }
+            break;
     }
 }
 
@@ -637,7 +646,7 @@ void rmsnorm_v13_autotune_cuda(
         auto it = g_autotune_cache.find(key);
         if (it != g_autotune_cache.end()) {
             int block_size = 256;
-            if (it->second.best_strategy == 4 && hidden_dim >= 4096) block_size = 512;
+            if ((it->second.best_strategy == 4 || it->second.best_strategy == 6) && hidden_dim >= 4096) block_size = 512;
             size_t smem = ((block_size + 31) / 32) * sizeof(float);
             AT_DISPATCH_FLOATING_TYPES_AND2(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
@@ -693,7 +702,7 @@ void rmsnorm_v13_autotune_cuda(
         int num_strategies = 0;
 
         if (dtype_code > 0) {
-            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), v19-unroll (4 if D>=2048), warp (5 if tiny)
+            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), v19-unroll (4 if D>=2048), warp (5 if tiny), v18-dynblock (6 if D>=4096)
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
             if (hidden_dim <= 4096) {
@@ -704,6 +713,9 @@ void rmsnorm_v13_autotune_cuda(
             }
             if (batch_size <= 8 && hidden_dim <= 1024) {
                 strategies[num_strategies++] = 5;
+            }
+            if (hidden_dim >= 4096) {
+                strategies[num_strategies++] = 6;
             }
         } else {
             // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=4096), warp (5 if tiny)
@@ -723,7 +735,7 @@ void rmsnorm_v13_autotune_cuda(
 
         for (int s = 0; s < num_strategies; ++s) {
             int strat = strategies[s];
-            int block = (strat == 4 && hidden_dim >= 4096) ? 512 : 256;
+            int block = ((strat == 4 || strat == 6) && hidden_dim >= 4096) ? 512 : 256;
             size_t smem = ((block + 31) / 32) * sizeof(float);
 
             float t;
@@ -804,7 +816,7 @@ void rmsnorm_v13_autotune_cuda(
     }
 
     // Launch best strategy
-    int block = (best_strategy == 4 && hidden_dim >= 4096) ? 512 : 256;
+    int block = ((best_strategy == 4 || best_strategy == 6) && hidden_dim >= 4096) ? 512 : 256;
     size_t smem = ((block + 31) / 32) * sizeof(float);
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
