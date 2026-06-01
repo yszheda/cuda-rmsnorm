@@ -297,4 +297,14 @@ void rmsnorm_v31_fp32_unroll_cuda(
     bool use_affine
 );
 
+// V32: fp32 2x unroll + __ldg() + dynamic block, fp16/bf16 = v15 + __ldg
+void rmsnorm_v32_fp32_unroll_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H

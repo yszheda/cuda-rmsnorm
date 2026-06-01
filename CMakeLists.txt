@@ -64,6 +64,7 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v29_const_dim.cu
     src/kernels/rmsnorm_v30_native_half2.cu
     src/kernels/rmsnorm_v31_fp32_unroll.cu
+    src/kernels/rmsnorm_v32_fp32_unroll2.cu
 )
 
 set(BINDING_SOURCES
