@@ -702,7 +702,7 @@ void rmsnorm_v13_autotune_cuda(
             if (hidden_dim <= 4096) {
                 strategies[num_strategies++] = 3;
             }
-            if (hidden_dim >= 4096) {
+            if (hidden_dim >= 2048) {
                 strategies[num_strategies++] = 4;
             }
             if (batch_size <= 8 && hidden_dim <= 1024) {
