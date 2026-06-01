@@ -63,8 +63,10 @@ __global__ void rmsnorm_v13_scalar_kernel(
         float x = ConvertOps<T>::to(input[row_offset + i]);
         sum_sq += x * x;
     }
+
     float total = block_reduce_sum(sum_sq, smem, blockDim.x);
     float rms = rsqrtf(total / hidden_dim + eps);
+
     #pragma unroll 8
     for (int64_t i = threadIdx.x; i < hidden_dim; i += blockDim.x) {
         float x = ConvertOps<T>::to(input[row_offset + i]);
@@ -529,61 +531,64 @@ static void launch_strategy_v13(int strategy, const T* input, T* output,
     constexpr int vw = ConvertOps<T>::vec_width;
 
     switch (strategy) {
-        case 0:  // scalar-unroll
-            rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+        case 0:  // scalar-unroll (v6-style with larger smem)
+            rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, 256 * sizeof(float)>>>(
                 input, output, weight, bias, hidden_dim, eps, use_affine);
             break;
         case 1:  // vectorized (v15-style, block=256)
             if (aligned) {
-                rmsnorm_v13_vec_kernel<T, vw><<<batch_size, block_size, smem>>>(
+                rmsnorm_v13_vec_kernel<T, vw><<<batch_size, 256, ((256 + 31) / 32) * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             } else {
-                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, 256 * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
         case 2:  // dynamic block + __ldg (v20-style)
             if (aligned) {
-                rmsnorm_v13_dynldg_kernel<T, vw><<<batch_size, block_size, smem>>>(
+                int blk = (hidden_dim >= 4096) ? 512 : 256;
+                rmsnorm_v13_dynldg_kernel<T, vw><<<batch_size, blk, ((blk + 31) / 32) * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             } else {
-                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, 256 * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
         case 3:  // compile-time constant hidden_dim (v29-style)
             if (aligned) {
                 launch_const_dim_v13<T>(input, output, weight, bias,
-                    batch_size, hidden_dim, eps, use_affine, block_size, smem);
+                    batch_size, hidden_dim, eps, use_affine, 256, ((256 + 31) / 32) * sizeof(float));
             } else {
-                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, 256 * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
-        case 4:  // v19-style: 2x unroll + __ldg (fp32 large)
+        case 4:  // v19-style: 2x unroll + __ldg
             if (aligned) {
-                rmsnorm_v13_unroll2_kernel<T, vw><<<batch_size, block_size, smem>>>(
+                int blk = (hidden_dim >= 4096) ? 512 : 256;
+                rmsnorm_v13_unroll2_kernel<T, vw><<<batch_size, blk, ((blk + 31) / 32) * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             } else {
-                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, 256 * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
         case 5:  // warp-persistent (tiny shapes: batch<=8, D<=1024)
             if (aligned) {
-                rmsnorm_v13_warp_kernel<T, vw><<<1, 256>>>(
+                rmsnorm_v13_warp_kernel<T, vw><<<1, 256, ((256 + 31) / 32) * sizeof(float)>>>(
                     input, output, weight, bias, batch_size, hidden_dim, eps, use_affine);
             } else {
-                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, smem>>>(
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, 256 * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
         case 6:  // v18-style: dynamic block (512 for D>=4096) + __ldg()
             if (aligned) {
-                rmsnorm_v13_dynldg_kernel<T, vw><<<batch_size, block_size, smem>>>(
+                int blk = (hidden_dim >= 4096) ? 512 : 256;
+                rmsnorm_v13_dynldg_kernel<T, vw><<<batch_size, blk, ((blk + 31) / 32) * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             } else {
-                rmsnorm_v13_scalar_kernel<T><<<batch_size, block_size, smem>>>(
+                rmsnorm_v13_scalar_kernel<T><<<batch_size, 256, 256 * sizeof(float)>>>(
                     input, output, weight, bias, hidden_dim, eps, use_affine);
             }
             break;
@@ -645,9 +650,6 @@ void rmsnorm_v13_autotune_cuda(
         std::lock_guard<std::mutex> lock(g_autotune_mutex);
         auto it = g_autotune_cache.find(key);
         if (it != g_autotune_cache.end()) {
-            int block_size = 256;
-            if ((it->second.best_strategy == 4 || it->second.best_strategy == 6) && hidden_dim >= 4096) block_size = 512;
-            size_t smem = ((block_size + 31) / 32) * sizeof(float);
             AT_DISPATCH_FLOATING_TYPES_AND2(
                 at::ScalarType::Half, at::ScalarType::BFloat16,
                 input.scalar_type(), "rmsnorm_v13_autotune",
@@ -655,11 +657,13 @@ void rmsnorm_v13_autotune_cuda(
                     constexpr int ab = ConvertOps<scalar_t>::align_bytes;
                     bool aligned = is_ptr_aligned<ab>(input.data_ptr<scalar_t>())
                                 && is_ptr_aligned<ab>(output.data_ptr<scalar_t>());
+                    // Replay uses hardcoded launch params matching the probing code
+                    int block_size = 256;
                     launch_strategy_v13<scalar_t>(it->second.best_strategy,
                         input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
                         weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
                         batch_size, hidden_dim, eps, use_affine,
-                        block_size, smem, aligned);
+                        block_size, ((block_size + 31) / 32) * sizeof(float), aligned);
                 });
             return;
         }
@@ -718,7 +722,7 @@ void rmsnorm_v13_autotune_cuda(
                 strategies[num_strategies++] = 6;
             }
         } else {
-            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=4096), warp (5 if tiny)
+            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=2048), warp (5 if tiny), v6-scalar (7 for all)
             strategies[num_strategies++] = 0;
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
@@ -731,12 +735,15 @@ void rmsnorm_v13_autotune_cuda(
             if (batch_size <= 8 && hidden_dim <= 1024) {
                 strategies[num_strategies++] = 5;
             }
+            // Always probe v6 for fp32 with larger smem (v6 uses 1024 bytes)
+            strategies[num_strategies++] = 7;
         }
 
         for (int s = 0; s < num_strategies; ++s) {
             int strat = strategies[s];
             int block = ((strat == 4 || strat == 6) && hidden_dim >= 4096) ? 512 : 256;
-            size_t smem = ((block + 31) / 32) * sizeof(float);
+            // v6 uses larger smem (1024 bytes) which affects occupancy
+            size_t smem = (strat == 0) ? (256 * sizeof(float)) : ((block + 31) / 32) * sizeof(float);
 
             float t;
             AT_DISPATCH_FLOATING_TYPES_AND2(

@@ -53,6 +53,7 @@ def benchmark_kernel(
     start_event.record()
     for _ in range(iterations):
         rmsnorm_ext.rmsnorm(x, weight, bias, eps, use_affine, version)
+    torch.cuda.synchronize()
     end_event.record()
     end_event.synchronize()
     total_us = start_event.elapsed_time(end_event) * 1000  # ms to us
