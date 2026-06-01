@@ -46,18 +46,17 @@ def benchmark_kernel(
         rmsnorm_ext.rmsnorm(x, weight, bias, eps, use_affine, version)
     torch.cuda.synchronize()
 
-    # Measure
-    timings = []
+    # Measure - use single event pair for accurate timing
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
+    start_event.record()
     for _ in range(iterations):
-        start_event.record()
         rmsnorm_ext.rmsnorm(x, weight, bias, eps, use_affine, version)
-        end_event.record()
-        torch.cuda.synchronize()
-        elapsed_ms = start_event.elapsed_time(end_event)
-        timings.append(elapsed_ms * 1000)  # convert to microseconds
+    end_event.record()
+    end_event.synchronize()
+    total_us = start_event.elapsed_time(end_event) * 1000  # ms to us
+    timings = [total_us / iterations] * iterations  # uniform for stats
 
     timings = np.array(timings)
     n_elements = x.numel() * x.element_size()
