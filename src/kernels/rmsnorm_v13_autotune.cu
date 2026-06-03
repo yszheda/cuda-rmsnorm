@@ -715,7 +715,7 @@ void rmsnorm_v13_autotune_cuda(
         int num_strategies = 0;
 
         if (dtype_code > 0) {
-            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), v19-unroll (4 if D>=2048), warp (5 if tiny), v18-dynblock (6 if D>=4096), v35-warp (7 if D>=2048)
+            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), v19-unroll (4 if D>=2048), warp (5 if tiny), v18-dynblock (6 if D>=4096)
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
             if (hidden_dim <= 4096) {
@@ -723,7 +723,6 @@ void rmsnorm_v13_autotune_cuda(
             }
             if (hidden_dim >= 2048) {
                 strategies[num_strategies++] = 4;
-                strategies[num_strategies++] = 7;
             }
             if (batch_size <= 8 && hidden_dim <= 1024) {
                 strategies[num_strategies++] = 5;
@@ -732,7 +731,7 @@ void rmsnorm_v13_autotune_cuda(
                 strategies[num_strategies++] = 6;
             }
         } else {
-            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=2048), warp (5 if tiny), v6-scalar (8 for all), v35-warp (9 for large D)
+            // fp32: probe scalar (0), v15 (1), v20 (2), v29-const (3 if D<=4096), v19-unroll (4 if D>=2048), warp (5 if tiny), v6-scalar (8 for all)
             strategies[num_strategies++] = 0;
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
@@ -747,10 +746,6 @@ void rmsnorm_v13_autotune_cuda(
             }
             // Always probe v6 for fp32 with larger smem (v6 uses 1024 bytes)
             strategies[num_strategies++] = 8;
-            // Probe v35 warp-specialized for large D
-            if (hidden_dim >= 2048) {
-                strategies[num_strategies++] = 9;
-            }
         }
 
         for (int s = 0; s < num_strategies; ++s) {
