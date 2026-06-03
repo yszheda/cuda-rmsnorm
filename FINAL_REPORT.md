@@ -2,15 +2,15 @@
 
 ## Executive Summary
 
-After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
+After exploring **37 kernel versions** (v0-v23, v25-v36), the project achieves:
 
 | Metric | Value |
 |--------|-------|
-| Total commits | 55 on master |
+| Total commits | 57 on master |
 | Tests | 186/186 passing |
-| v13 best configs | 4/6 (66.7%) |
+| v13 best configs | 3/6 (50%) |
 | v13 within 1.5% | 6/6 (100%) |
-| Kernels explored | 36 (v0-v23, v25-v35) |
+| Kernels explored | 37 (v0-v23, v25-v36) |
 
 ## Performance Results by Model (5-run average)
 
@@ -29,7 +29,7 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 | Version | Technique | Result |
 |---------|-----------|--------|
 | v15 | Vectorized 128-bit loads + unroll | Baseline for fp16/bf16 |
-| v13 | Runtime autotune (7 strategies) | Best overall, 4/6 wins, within 1.5% at 6/6 |
+| v13 | Runtime autotune (7 strategies) | Best overall, 3/6 wins, within 1.5% at 6/6 |
 | v29 | Const-dim template (full unroll) | Best for D<=4096 small batch |
 | v20 | __ldg() cache hints | Wins at Llama 70B fp16 |
 | v18 | Dynamic block size + __ldg() | Competitive at D>=4096 |
@@ -48,6 +48,7 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 | v32/v33 | 2x/adaptive unroll | Marginal wins at fp32 only |
 | v34 | Shared memory weight/bias | 1.2-2.0x slower (smem overhead) |
 | v35 | Warp-specialized | **Incorrect output**, 2-4x slower |
+| v36 | Shared memory tiling | 1.2-1.5x slower (smem load overhead) |
 
 ## SOTA Comparison
 
@@ -64,8 +65,9 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 1. **Memory bandwidth is the primary bottleneck** - RMSNorm is load/store bound
 2. **Vectorized 128-bit loads** provide the biggest single optimization (~20-40%)
 3. **Operator fusion** (RMSNorm + MatMul, as in Mirage) is the next frontier
-4. **Shared memory caching** doesn't help for single-use data
+4. **Shared memory caching** doesn't help for single-use data (v24, v34, v36 all failed)
 5. **GPU clock noise** causes 2-5% measurement variance
+6. **Native half2 arithmetic** (v27, v30) doesn't beat fp32 conversion on this hardware
 
 ## Recommendations for Future Work
 
@@ -73,6 +75,7 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 2. **Fuse RMSNorm + MatMul** - Follow Mirage approach for 1.5-1.7x speedup
 3. **Persistent mega-kernel** - Follow Mirage MPK for full LLM fusion
 4. **Hardware clock locking** - For accurate benchmarking
+5. **Profile with Nsight Compute** - For detailed instruction-level analysis
 
 ## Sources
 
