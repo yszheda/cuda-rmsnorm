@@ -2,27 +2,27 @@
 
 ## Executive Summary
 
-After exploring **37 kernel versions** (v0-v23, v25-v36), the project achieves:
+After exploring **39 kernel versions** (v0-v23, v25-v38), the project achieves:
 
 | Metric | Value |
 |--------|-------|
-| Total commits | 60 on master |
+| Total commits | 62 on master |
 | Tests | 186/186 passing |
 | v13 best configs | 4/6 (66.7%) |
 | v13 within 1% | 5/6 (83.3%) |
-| v13 within 5% | 6/6 (100%) |
-| Kernels explored | 37 (v0-v23, v25-v36) |
+| v13 within 6% | 6/6 (100%) |
+| Kernels explored | 39 (v0-v23, v25-v38) |
 
 ## Performance Results by Model
 
-| Model | Shape | Dtype | v13 (us) | Best (us) | Ratio |
-|-------|-------|-------|----------|-----------|-------|
-| QKNorm | (1, 128) | fp16 | 69.6 | 69.6 (v13) | 1.000x |
-| QKNorm b32 | (32, 128) | fp16 | 71.7 | 71.7 (v13) | 1.000x |
-| Llama 1B | (32, 2048) | fp16 | 111.4 | 111.4 (v13) | 1.000x |
-| Llama 8B | (32, 4096) | fp16 | 141.1 | 141.1 (v13) | 1.000x |
-| Llama 70B | (32, 8192) | fp16 | 184.9 | 183.6 (v20) | 1.007x |
-| Llama 405B | (32, 16384) | bf16 | 285.9 | 275.1 (v13) | 1.000x |
+| Model | Shape | Dtype | v13 (us) | Best (us) | Best Kernel | Ratio |
+|-------|-------|-------|----------|-----------|-------------|-------|
+| QKNorm | (1, 128) | fp16 | 69.8 | 69.8 | v13 | 1.000x |
+| QKNorm b32 | (32, 128) | fp16 | 72.4 | 72.4 | v29 | 1.001x |
+| Llama 1B | (32, 2048) | fp16 | 114.5 | 108.4 | v29 | 1.056x |
+| Llama 8B | (32, 4096) | fp16 | 140.2 | 140.2 | v13 | 1.000x |
+| Llama 70B | (32, 8192) | fp16 | 184.6 | 184.6 | v13 | 1.000x |
+| Llama 405B | (32, 16384) | bf16 | 270.7 | 270.7 | v13 | 1.000x |
 
 ## Kernel Evolution Summary
 
@@ -30,7 +30,7 @@ After exploring **37 kernel versions** (v0-v23, v25-v36), the project achieves:
 | Version | Technique | Result |
 |---------|-----------|--------|
 | v15 | Vectorized 128-bit loads + unroll | Baseline for fp16/bf16 |
-| v13 | Runtime autotune (7 strategies) | Best overall, 4/6 wins, within 1% at 5/6 |
+| v13 | Runtime autotune (7 strategies) | Best overall, 4/6 wins |
 | v29 | Const-dim template (full unroll) | Best for D<=4096 small batch |
 | v20 | __ldg() cache hints | Wins at Llama 70B fp16 |
 | v18 | Dynamic block size + __ldg() | Competitive at D>=4096 |
@@ -50,12 +50,14 @@ After exploring **37 kernel versions** (v0-v23, v25-v36), the project achieves:
 | v34 | Shared memory weight/bias | 1.2-2.0x slower (smem overhead) |
 | v35 | Warp-specialized | **Incorrect output**, 2-4x slower |
 | v36 | Shared memory tiling | 1.2-1.5x slower (smem load overhead) |
+| v37 | Persistent grid-stride | 1.2-1.5x slower (sync overhead) |
+| v38 | Unroll for small D | Similar to v29, no advantage |
 
 ## SOTA Comparison
 
 | Implementation | Technique | Peak BW Util | Notes |
 |----------------|-----------|--------------|-------|
-| **This work (v13)** | 7-strategy autotune | ~77-95% | Within 1% of SOTA |
+| **This work (v13)** | 7-strategy autotune | ~77-95% | Within 1% of optimal at 5/6 |
 | Liger-Kernel (Triton) | Fused ops, RMS caching | ~85-90% | [GitHub](https://github.com/linkedin/Liger-Kernel) |
 | MGRrmsnorm (CUDA) | Vectorized, warp reduction | ~80-85% | [GitHub](https://github.com/MadrasLe/MGRrmsnorm) |
 | Mirage (Stanford) | Auto-fused RMSNorm+MatMul | N/A (fused) | [Tutorial](https://mirage-project.readthedocs.io/en/latest/tutorials/rms-norm-linear.html) |
@@ -69,6 +71,7 @@ After exploring **37 kernel versions** (v0-v23, v25-v36), the project achieves:
 4. **Shared memory caching** doesn't help for single-use data (v24, v34, v36 all failed)
 5. **GPU clock noise** causes 2-5% measurement variance
 6. **Native half2 arithmetic** (v27, v30) doesn't beat fp32 conversion on this hardware
+7. **Persistent kernels** (v37) are slower due to sync overhead for small batch sizes
 
 ## Recommendations for Future Work
 
