@@ -4,10 +4,10 @@
 #include "rmsnorm_common.h"
 
 // ============================================================================
-// V35: Warp-specialized persistent kernel
-// - Each warp processes multiple elements with full ILP
-// - No shared memory synchronization needed (warp-shuffle only)
-// - block_size = 256, 8 warps process 8 chunks of hidden_dim
+// V35: Warp-specialized kernel with full block reduction
+// - Each warp processes one chunk of hidden_dim
+// - Uses shared memory to aggregate per-warp sums
+// - block_size = 256, 8 warps process 8 chunks
 // ============================================================================
 
 template<typename T, int vec_width>
@@ -20,30 +20,30 @@ __global__ void rmsnorm_v35_warp_specialized_kernel(
     float eps,
     bool use_affine
 ) {
+    int64_t row_idx = blockIdx.x;
+    int64_t row_offset = row_idx * hidden_dim;
+
+    extern __shared__ char smem_raw[];
+    float* smem = reinterpret_cast<float*>(smem_raw);
+
     int warp_id = threadIdx.x / 32;
     int lane = threadIdx.x % 32;
     int num_warps = blockDim.x / 32;
 
-    // Each warp processes one chunk of the row
-    int64_t chunk_size = hidden_dim / num_warps;
-    int64_t chunk_start = warp_id * chunk_size;
-    int64_t chunk_end = (warp_id + 1) * chunk_size;
-    int64_t row_offset = blockIdx.x * hidden_dim;
+    int64_t vec_dim = (hidden_dim / vec_width) * vec_width;
+    int64_t num_vec = vec_dim / vec_width;
 
-    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
-    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
-    float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
-    const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
-
-    int64_t vec_per_chunk = chunk_size / vec_width;
+    // Each warp processes a contiguous chunk of vectors
+    int64_t vec_per_warp = num_vec / num_warps;
+    int64_t vec_start = warp_id * vec_per_warp;
+    int64_t vec_end = (warp_id + 1) * vec_per_warp;
 
     // Sum-of-squares for this warp's chunk
     float sum_sq = 0.0f;
-    int64_t vec_start = warp_id * vec_per_chunk;
-    int64_t vec_end = (warp_id + 1) * vec_per_chunk;
-
-    for (int64_t i = lane + vec_start; i < vec_end; i += 32) {
-        float4 v = input_vec[i];
+    for (int64_t i = vec_start + lane; i < vec_end; i += 32) {
+        float4 v;
+        const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
+        v = input_vec[i];
         const typename ConvertOps<T>::vec_elem_t* e = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
         #pragma unroll
         for (int j = 0; j < vec_width; ++j) {
@@ -52,19 +52,59 @@ __global__ void rmsnorm_v35_warp_specialized_kernel(
         }
     }
 
+    // Handle remaining vectors (if num_vec not divisible by num_warps)
+    for (int64_t i = vec_start + lane; i < num_vec; i += 32) {
+        if (i >= vec_end) {
+            float4 v;
+            const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
+            v = input_vec[i];
+            const typename ConvertOps<T>::vec_elem_t* e = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&v);
+            #pragma unroll
+            for (int j = 0; j < vec_width; ++j) {
+                float x = ConvertOps<T>::to(e[j]);
+                sum_sq += x * x;
+            }
+        }
+    }
+
+    // Scalar remainder for each warp's chunk
+    int64_t scalar_start = vec_dim + warp_id * ((hidden_dim - vec_dim) / num_warps);
+    int64_t scalar_end = vec_dim + (warp_id + 1) * ((hidden_dim - vec_dim) / num_warps);
+    if (warp_id == num_warps - 1) scalar_end = hidden_dim;
+
+    for (int64_t i = scalar_start + lane; i < scalar_end; i += 32) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        sum_sq += x * x;
+    }
+
     // Warp reduction
     sum_sq = warp_reduce_sum(sum_sq);
 
-    // Broadcast sum_sq to all lanes in the warp
-    float total = __shfl_sync(0xffffffff, sum_sq, 0);
+    // Each warp leader writes its partial sum to shared memory
+    if (lane == 0) {
+        smem[warp_id] = sum_sq;
+    }
+    __syncthreads();
 
-    float rms = rsqrtf(total / hidden_dim + eps);
+    // Thread 0 aggregates all warp sums
+    float total = 0.0f;
+    if (threadIdx.x == 0) {
+        for (int w = 0; w < num_warps; ++w) {
+            total += smem[w];
+        }
+        smem[0] = total;
+    }
+    __syncthreads();
+
+    float rms = rsqrtf(smem[0] / hidden_dim + eps);
 
     // Normalize this warp's chunk
-    int64_t out_vec_start = warp_id * vec_per_chunk;
-    int64_t out_vec_end = (warp_id + 1) * vec_per_chunk;
+    const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
+    float4* output_vec = reinterpret_cast<float4*>(output + row_offset);
+    const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
 
-    for (int64_t i = lane + out_vec_start; i < out_vec_end; i += 32) {
+    for (int64_t i = vec_start + lane; i < vec_end; i += 32) {
         float4 vin = input_vec[i];
         float4 vout;
         float4 wv, bv;
@@ -87,6 +127,48 @@ __global__ void rmsnorm_v35_warp_specialized_kernel(
             ConvertOps<T>::elem_store(oe + j, val);
         }
         output_vec[i] = vout;
+    }
+
+    // Handle remaining vectors
+    for (int64_t i = vec_start + lane; i < num_vec; i += 32) {
+        if (i >= vec_end) {
+            float4 vin;
+            const float4* input_vec = reinterpret_cast<const float4*>(input + row_offset);
+            vin = input_vec[i];
+            float4 vout;
+            float4 wv, bv;
+            const float4* weight_vec = reinterpret_cast<const float4*>(weight);
+            const float4* bias_vec = reinterpret_cast<const float4*>(bias);
+            if (use_affine) {
+                wv = __ldg(&weight_vec[i]);
+                bv = __ldg(&bias_vec[i]);
+            }
+
+            typename ConvertOps<T>::vec_elem_t* oe = reinterpret_cast<typename ConvertOps<T>::vec_elem_t*>(&vout);
+            const typename ConvertOps<T>::vec_elem_t* ie = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&vin);
+            const typename ConvertOps<T>::vec_elem_t* we = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&wv);
+            const typename ConvertOps<T>::vec_elem_t* be = reinterpret_cast<const typename ConvertOps<T>::vec_elem_t*>(&bv);
+
+            #pragma unroll
+            for (int j = 0; j < vec_width; ++j) {
+                float val = ConvertOps<T>::to(ie[j]) * rms;
+                if (use_affine) {
+                    val = val * ConvertOps<T>::to(we[j]) + ConvertOps<T>::to(be[j]);
+                }
+                ConvertOps<T>::elem_store(oe + j, val);
+            }
+            output_vec[i] = vout;
+        }
+    }
+
+    // Scalar remainder
+    for (int64_t i = scalar_start + lane; i < scalar_end; i += 32) {
+        float x = ConvertOps<T>::to(input[row_offset + i]);
+        float out = x * rms;
+        if (use_affine) {
+            out = out * __ldg(&weight[i]) + __ldg(&bias[i]);
+        }
+        output[row_offset + i] = ConvertOps<T>::from(out);
     }
 }
 
@@ -141,7 +223,7 @@ void rmsnorm_v35_warp_specialized_cuda(
     }
 
     int block_size = 256;
-    size_t smem_size = ((block_size + 31) / 32) * sizeof(float);
+    size_t smem_size = 64 * sizeof(float);  // enough for warp sums
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
@@ -154,7 +236,7 @@ void rmsnorm_v35_warp_specialized_cuda(
                         && is_ptr_aligned<ab>(output.data_ptr<scalar_t>());
 
             if (aligned && hidden_dim % 8 == 0) {
-                rmsnorm_v35_warp_specialized_kernel<scalar_t, vw><<<batch_size, block_size>>>(
+                rmsnorm_v35_warp_specialized_kernel<scalar_t, vw><<<batch_size, block_size, smem_size>>>(
                     input.data_ptr<scalar_t>(),
                     output.data_ptr<scalar_t>(),
                     weight.data_ptr<scalar_t>(),
