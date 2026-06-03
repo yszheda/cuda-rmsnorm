@@ -750,7 +750,8 @@ void rmsnorm_v13_autotune_cuda(
 
         for (int s = 0; s < num_strategies; ++s) {
             int strat = strategies[s];
-            int block = ((strat == 4 || strat == 6) && hidden_dim >= 4096) ? 512 : 256;
+            // v18, v20, v19 use block=512 for D>=4096
+            int block = ((strat == 2 || strat == 4 || strat == 6) && hidden_dim >= 4096) ? 512 : 256;
             // v6 uses larger smem (1024 bytes) which affects occupancy
             size_t smem = (strat == 0) ? (256 * sizeof(float)) : ((block + 31) / 32) * sizeof(float);
 
