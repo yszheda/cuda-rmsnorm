@@ -8,21 +8,21 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 |--------|-------|
 | Total commits | 53 on master |
 | Tests | 186/186 passing |
-| v13 best configs | 31/36 |
-| v13 within 1% | 34/36 |
-| v13 within 5% | 36/36 |
+| v13 best configs | 4/6 (66.7%) |
+| v13 within 1% | 4/6 (66.7%) |
+| v13 within 5% | 6/6 (100%) |
 | Kernels explored | 36 (v0-v23, v25-v35) |
 
 ## Performance Results by Model
 
 | Model | Shape | Dtype | v13 (us) | Best (us) | Ratio |
 |-------|-------|-------|----------|-----------|-------|
-| QKNorm | (1, 128) | fp16 | 77.4 | 70.5 (v29) | 1.098x |
-| QKNorm b32 | (32, 128) | fp16 | 74.5 | 71.7 (v29) | 1.039x |
-| Llama 1B | (32, 2048) | fp16 | 112.9 | 112.9 (v13) | 1.000x |
-| Llama 8B | (32, 4096) | fp16 | 141.5 | 141.5 (v13) | 1.000x |
-| Llama 70B | (32, 8192) | fp16 | 187.4 | 187.4 (v13) | 1.000x |
-| Llama 405B | (32, 16384) | bf16 | 276.6 | 271.6 (v18) | 1.018x |
+| QKNorm | (1, 128) | fp16 | 77.8 | 77.8 (v13) | 1.000x |
+| QKNorm b32 | (32, 128) | fp16 | 73.7 | 70.9 (v29) | 1.041x |
+| Llama 1B | (32, 2048) | fp16 | 110.2 | 110.2 (v13) | 1.000x |
+| Llama 8B | (32, 4096) | fp16 | 148.2 | 148.2 (v13) | 1.000x |
+| Llama 70B | (32, 8192) | fp16 | 192.3 | 185.6 (v31) | 1.036x |
+| Llama 405B | (32, 16384) | bf16 | 277.1 | 277.1 (v13) | 1.000x |
 
 ## Kernel Evolution Summary
 
@@ -30,10 +30,11 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 | Version | Technique | Result |
 |---------|-----------|--------|
 | v15 | Vectorized 128-bit loads + unroll | Baseline for fp16/bf16 |
-| v13 | Runtime autotune (8 strategies) | Best overall, 31/36 wins |
+| v13 | Runtime autotune (7 strategies) | Best overall, 4/6 wins |
 | v29 | Const-dim template (full unroll) | Best for D<=4096 small batch |
 | v20 | __ldg() cache hints | Wins fp32 at some shapes |
 | v18 | Dynamic block size + __ldg() | Wins at D>=4096 fp16/bf16 |
+| v31 | 4x unroll fp32 | Wins at Llama 70B fp16 |
 
 ### Failed Experiments
 | Version | Technique | Failure Reason |
@@ -46,7 +47,7 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 | v26 | Shared memory input cache | Incorrect implementation |
 | v27/v28 | Native half2 arithmetic | Loses 1.05-1.35x at all sizes |
 | v30 | Native half2 throughout | Numerical issues (6.25% diff) |
-| v31/v32/v33 | 4x/2x unroll fp32 | Marginal wins at fp32 only |
+| v32/v33 | 2x/adaptive unroll | Marginal wins at fp32 only |
 | v34 | Shared memory weight/bias | 1.2-2.0x slower (smem overhead) |
 | v35 | Warp-specialized | **Incorrect output**, 2-4x slower |
 
@@ -54,7 +55,7 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 
 | Implementation | Technique | Peak BW Util | Notes |
 |----------------|-----------|--------------|-------|
-| **This work (v13)** | 8-strategy autotune | ~77-95% | Within 2% of SOTA |
+| **This work (v13)** | 7-strategy autotune | ~77-95% | Within 4% of SOTA |
 | Liger-Kernel (Triton) | Fused ops, RMS caching | ~85-90% | [GitHub](https://github.com/linkedin/Liger-Kernel) |
 | MGRrmsnorm (CUDA) | Vectorized, warp reduction | ~80-85% | [GitHub](https://github.com/MadrasLe/MGRrmsnorm) |
 | Mirage (Stanford) | Auto-fused RMSNorm+MatMul | N/A (fused) | [Tutorial](https://mirage-project.readthedocs.io/en/latest/tutorials/rms-norm-linear.html) |
