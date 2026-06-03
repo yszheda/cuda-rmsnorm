@@ -337,4 +337,14 @@ void rmsnorm_v35_warp_specialized_cuda(
     bool use_affine
 );
 
+// V36: Shared memory tiling for small-to-medium hidden_dim
+void rmsnorm_v36_smem_tile_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
