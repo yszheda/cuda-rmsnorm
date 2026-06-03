@@ -730,17 +730,6 @@ void rmsnorm_v13_autotune_cuda(
         // Scalar is only option
         best_strategy = 0;
     } else {
-        // GPU warmup: run kernel launches to bring GPU to max frequency
-        {
-            cudaStream_t stream;
-            cudaStreamCreate(&stream);
-            for (int i = 0; i < 5; ++i) {
-                cudaMemsetAsync(output.data_ptr(), 0, output.numel() * output.element_size(), stream);
-            }
-            cudaStreamSynchronize(stream);
-            cudaStreamDestroy(stream);
-        }
-
         // Determine which strategies to probe
         int strategies[6];
         int num_strategies = 0;
