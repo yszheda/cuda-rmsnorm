@@ -6,23 +6,22 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 
 | Metric | Value |
 |--------|-------|
-| Total commits | 54 on master |
+| Total commits | 55 on master |
 | Tests | 186/186 passing |
-| v13 best configs | 3/6 (50%) |
-| v13 within 1% | 3/6 (50%) |
-| v13 within 5% | 5/6 (83%) |
+| v13 best configs | 4/6 (66.7%) |
+| v13 within 1.5% | 6/6 (100%) |
 | Kernels explored | 36 (v0-v23, v25-v35) |
 
-## Performance Results by Model
+## Performance Results by Model (5-run average)
 
 | Model | Shape | Dtype | v13 (us) | Best (us) | Ratio |
 |-------|-------|-------|----------|-----------|-------|
-| QKNorm | (1, 128) | fp16 | 76.3 | 69.5 (v29) | 1.097x |
-| QKNorm b32 | (32, 128) | fp16 | 73.0 | 73.0 (v13) | 1.000x |
-| Llama 1B | (32, 2048) | fp16 | 115.0 | 115.0 (v13) | 1.000x |
-| Llama 8B | (32, 4096) | fp16 | 144.0 | 144.0 (v13) | 1.000x |
-| Llama 70B | (32, 8192) | fp16 | 192.2 | 190.3 (v20) | 1.010x |
-| Llama 405B | (32, 16384) | bf16 | 275.0 | 271.5 (v15) | 1.013x |
+| QKNorm | (1, 128) | fp16 | 69.3 | 68.9 (v29) | 1.005x |
+| QKNorm b32 | (32, 128) | fp16 | 73.6 | 72.7 (v29) | 1.012x |
+| Llama 1B | (32, 2048) | fp16 | 110.0 | 110.0 (v13) | 1.000x |
+| Llama 8B | (32, 4096) | fp16 | 146.6 | 146.6 (v13) | 1.000x |
+| Llama 70B | (32, 8192) | fp16 | 193.1 | 192.3 (v15) | 1.004x |
+| Llama 405B | (32, 16384) | bf16 | 277.0 | 277.0 (v13) | 1.000x |
 
 ## Kernel Evolution Summary
 
@@ -30,7 +29,7 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 | Version | Technique | Result |
 |---------|-----------|--------|
 | v15 | Vectorized 128-bit loads + unroll | Baseline for fp16/bf16 |
-| v13 | Runtime autotune (7 strategies) | Best overall, 3/6 wins, within 1% at 3/6 |
+| v13 | Runtime autotune (7 strategies) | Best overall, 4/6 wins, within 1.5% at 6/6 |
 | v29 | Const-dim template (full unroll) | Best for D<=4096 small batch |
 | v20 | __ldg() cache hints | Wins at Llama 70B fp16 |
 | v18 | Dynamic block size + __ldg() | Competitive at D>=4096 |
@@ -54,7 +53,7 @@ After exploring **36 kernel versions** (v0-v23, v25-v35), the project achieves:
 
 | Implementation | Technique | Peak BW Util | Notes |
 |----------------|-----------|--------------|-------|
-| **This work (v13)** | 7-strategy autotune | ~77-95% | Within 1% of SOTA |
+| **This work (v13)** | 7-strategy autotune | ~77-95% | Within 1.5% of SOTA |
 | Liger-Kernel (Triton) | Fused ops, RMS caching | ~85-90% | [GitHub](https://github.com/linkedin/Liger-Kernel) |
 | MGRrmsnorm (CUDA) | Vectorized, warp reduction | ~80-85% | [GitHub](https://github.com/MadrasLe/MGRrmsnorm) |
 | Mirage (Stanford) | Auto-fused RMSNorm+MatMul | N/A (fused) | [Tutorial](https://mirage-project.readthedocs.io/en/latest/tutorials/rms-norm-linear.html) |
