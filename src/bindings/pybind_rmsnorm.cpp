@@ -70,6 +70,7 @@ void rmsnorm_cuda_wrapper(
         case 31: rmsnorm_v31_fp32_unroll_cuda(output, input, weight, bias, eps, use_affine); break;
         case 32: rmsnorm_v32_fp32_unroll_cuda(output, input, weight, bias, eps, use_affine); break;
         case 33: rmsnorm_v33_adaptive_unroll_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 34: rmsnorm_v34_smem_cache_cuda(output, input, weight, bias, eps, use_affine); break;
         default:
             // Use the best version (v15) as default
             rmsnorm_v15_vec_unroll_cuda(output, input, weight, bias, eps, use_affine);
