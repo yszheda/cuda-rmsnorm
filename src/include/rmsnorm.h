@@ -327,4 +327,14 @@ void rmsnorm_v34_smem_cache_cuda(
     bool use_affine
 );
 
+// V35: Warp-specialized persistent kernel
+void rmsnorm_v35_warp_specialized_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H
