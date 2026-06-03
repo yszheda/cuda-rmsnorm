@@ -686,8 +686,14 @@ void rmsnorm_v13_autotune_cuda(
                                 && is_ptr_aligned<ab>(output.data_ptr<scalar_t>());
                     // Replay uses launch params matching the probing code
                     int strat = it->second.best_strategy;
-                    int block_size = ((strat == 2 || strat == 4 || strat == 6) && hidden_dim >= 4096) ? 512 : 256;
-                    size_t smem = (strat == 0 || strat == 8) ? (256 * sizeof(float)) : ((block_size + 31) / 32) * sizeof(float);
+                    int block_size = 256;
+                    if ((strat == 2 || strat == 4 || strat == 6) && hidden_dim >= 4096) {
+                        block_size = 512;
+                    }
+                    size_t smem = ((block_size + 31) / 32) * sizeof(float);
+                    if (strat == 0 || strat == 8) {
+                        smem = 256 * sizeof(float);
+                    }
                     launch_strategy_v13<scalar_t>(strat,
                         input.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(),
                         weight.data_ptr<scalar_t>(), bias.data_ptr<scalar_t>(),
@@ -721,7 +727,7 @@ void rmsnorm_v13_autotune_cuda(
     // - fp32: v20 usually wins over v15, v6 for small shapes
     // - Not aligned: scalar only
     int warmup = 5;
-    int iterations = 100;
+    int iterations = 200;
 
     int best_strategy = 1;  // default: vectorized
     float best_time = 1e9f;
@@ -731,16 +737,14 @@ void rmsnorm_v13_autotune_cuda(
         best_strategy = 0;
     } else {
         // Determine which strategies to probe
-        int strategies[6];
+        int strategies[8];
         int num_strategies = 0;
 
         if (dtype_code > 0) {
-            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3 if small D), v19-unroll (4 if D>=2048), warp (5 if tiny), v18-dynblock (6 if D>=4096)
+            // fp16/bf16: probe v15 (1), v20 (2), v29-const (3), v19-unroll (4 if D>=2048), warp (5 if tiny), v18-dynblock (6 if D>=4096)
             strategies[num_strategies++] = 1;
             strategies[num_strategies++] = 2;
-            if (hidden_dim <= 4096) {
-                strategies[num_strategies++] = 3;
-            }
+            strategies[num_strategies++] = 3;  // Always probe v29 for all shapes
             if (hidden_dim >= 2048) {
                 strategies[num_strategies++] = 4;
             }
