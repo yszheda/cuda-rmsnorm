@@ -73,6 +73,8 @@ void rmsnorm_cuda_wrapper(
         case 34: rmsnorm_v34_smem_cache_cuda(output, input, weight, bias, eps, use_affine); break;
         case 35: rmsnorm_v35_warp_specialized_cuda(output, input, weight, bias, eps, use_affine); break;
         case 36: rmsnorm_v36_smem_tile_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 37: rmsnorm_v37_persistent_cuda(output, input, weight, bias, eps, use_affine); break;
+        case 38: rmsnorm_v38_unroll_small_cuda(output, input, weight, bias, eps, use_affine); break;
         default:
             // Use the best version (v15) as default
             rmsnorm_v15_vec_unroll_cuda(output, input, weight, bias, eps, use_affine);

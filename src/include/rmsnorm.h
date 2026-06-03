@@ -347,4 +347,24 @@ void rmsnorm_v36_smem_tile_cuda(
     bool use_affine
 );
 
+// V37: Persistent kernel with row-level parallelism (grid-stride)
+void rmsnorm_v37_persistent_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
+// V38: Unroll for small D (D <= 256)
+void rmsnorm_v38_unroll_small_cuda(
+    torch::Tensor output,
+    const torch::Tensor input,
+    const torch::Tensor weight,
+    const torch::Tensor bias,
+    float eps,
+    bool use_affine
+);
+
 #endif // RMSNORM_H

@@ -69,6 +69,8 @@ set(KERNEL_SOURCES
     src/kernels/rmsnorm_v34_smem_cache.cu
     src/kernels/rmsnorm_v35_warp_specialized.cu
     src/kernels/rmsnorm_v36_smem_tile.cu
+    src/kernels/rmsnorm_v37_persistent_v2.cu
+    src/kernels/rmsnorm_v38_unroll_small.cu
 )
 
 set(BINDING_SOURCES
