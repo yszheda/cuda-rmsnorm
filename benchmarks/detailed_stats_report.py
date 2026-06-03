@@ -11,6 +11,11 @@ def run_benchmark(shape, dtype, kernels, num_runs=30):
     w = torch.randn(shape[-1], dtype=dtype, device="cuda")
     b = torch.randn(shape[-1], dtype=dtype, device="cuda")
 
+    # GPU warmup: bring GPU to max frequency before testing
+    for _ in range(10):
+        rmsnorm(x, w, b, version=15)
+    torch.cuda.synchronize()
+
     results = {}
     for v in kernels:
         times = []
