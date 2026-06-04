@@ -18,12 +18,16 @@ def run_benchmark(shape, dtype, kernels, num_runs=30):
 
     results = {}
     for v in kernels:
+        # Warmup each kernel to populate cache
+        for _ in range(3):
+            rmsnorm(x, w, b, version=v)
+        torch.cuda.synchronize()
+
+        # Wait for autotune to complete
+        torch.cuda.synchronize()
+
         times = []
         for _ in range(num_runs):
-            for _ in range(3):
-                rmsnorm(x, w, b, version=v)
-            torch.cuda.synchronize()
-
             se = torch.cuda.Event(enable_timing=True)
             ee = torch.cuda.Event(enable_timing=True)
             se.record()
@@ -165,3 +169,29 @@ if __name__ == "__main__":
     print(f"\nv13 best: {v13_wins}/{len(all_results)} ({v13_wins/len(all_results)*100:.1f}%)")
     print(f"v13 within 1%: {v13_within_1pct}/{len(all_results)} ({v13_within_1pct/len(all_results)*100:.1f}%)")
     print(f"v13 within 5%: {v13_within_5pct}/{len(all_results)} ({v13_within_5pct/len(all_results)*100:.1f}%)")
+
+    # Overall best kernel analysis
+    print("\n" + "=" * 80)
+    print("OVERALL BEST KERNEL ANALYSIS")
+    print("=" * 80)
+
+    best_kernel_counts = {}
+    for name, results in all_results.items():
+        best_v = min(results, key=lambda v: results[v]["mean"])
+        best_kernel_counts[best_v] = best_kernel_counts.get(best_v, 0) + 1
+
+    for v in sorted(best_kernel_counts.keys()):
+        print(f"  v{v}: best at {best_kernel_counts[v]}/{len(all_results)} shapes ({best_kernel_counts[v]/len(all_results)*100:.1f}%)")
+
+    # Performance ranking by average across all shapes
+    print("\n" + "=" * 80)
+    print("PERFORMANCE RANKING (Average time across all shapes)")
+    print("=" * 80)
+
+    kernel_avg = {}
+    for v in kernels:
+        total_time = sum(all_results[name][v]["mean"] for name in all_results)
+        kernel_avg[v] = total_time / len(all_results)
+
+    for v in sorted(kernel_avg.keys(), key=lambda v: kernel_avg[v]):
+        print(f"  v{v}: {kernel_avg[v]:.2f}us average")
