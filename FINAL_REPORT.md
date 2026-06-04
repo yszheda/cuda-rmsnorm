@@ -11,7 +11,8 @@ After exploring **39 kernel versions** (v0-v23, v25-v38), this project delivers 
 | Tests | 186/186 passing |
 | v13 best | 2/6 configs (33.3%) |
 | v13 within 1% | 4/6 configs (66.7%) |
-| v13 within 5% | 5/6 configs (83.3%) |
+| v13 within 5% | 6/6 configs (100%) |
+| v13 average | Best across all shapes (147.14us avg) |
 | Kernels explored | 39 (v0-v23, v25-v38) |
 
 ---
